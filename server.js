@@ -1,7 +1,7 @@
 // ======================================================
 // LUDO MULTIPLAYER SERVER
-// نسخه نهایی Real-Time Multiplayer
-// Node.js + WebSocket
+// نسخه نهایی - WebSocket Multiplayer
+// Node.js + ws
 // ======================================================
 
 const http = require("http");
@@ -16,47 +16,39 @@ const PORT = process.env.PORT || 3000;
 const MAX_PLAYERS = 4;
 const MIN_PLAYERS = 2;
 
-const TURN_TIME = 20;
-
 const ROOM_EXPIRE_TIME = 30 * 60 * 1000;
-
-const RECONNECT_TIME = 2 * 60 * 1000;
+const DISCONNECT_GRACE = 30 * 1000;
 
 // ======================================================
 // HTTP SERVER
 // ======================================================
 
 const server = http.createServer((req, res) => {
-
     res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS"
+        "Cache-Control": "no-cache"
     });
 
-    if (req.method === "OPTIONS") {
-        res.end();
-        return;
-    }
-
-    res.end(JSON.stringify({
-        ok: true,
-        service: "ludo-server",
-        version: "3.0.0",
-        multiplayer: true,
-        rooms: rooms.size,
-        players: getTotalPlayers(),
-        uptime: Math.floor(process.uptime())
-    }));
+    res.end(
+        JSON.stringify({
+            ok: true,
+            service: "ludo-server",
+            version: "3.0.0",
+            players: getTotalPlayers(),
+            rooms: rooms.size,
+            time: Date.now()
+        })
+    );
 });
 
 // ======================================================
-// WEBSOCKET
+// WEBSOCKET SERVER
 // ======================================================
 
 const wss = new WebSocket.Server({
-    server
+    server,
+    clientTracking: true
 });
 
 // ======================================================
@@ -66,81 +58,80 @@ const wss = new WebSocket.Server({
 const rooms = new Map();
 
 // ======================================================
-// HELPERS
+// COLORS
+// ======================================================
+
+const PLAYER_COLORS = [
+    "red",
+    "green",
+    "yellow",
+    "blue"
+];
+
+// ======================================================
+// SEND
 // ======================================================
 
 function send(ws, data) {
-
     if (!ws) return;
 
     if (ws.readyState === WebSocket.OPEN) {
-
         try {
             ws.send(JSON.stringify(data));
         } catch (error) {
             console.error("Send error:", error.message);
         }
-
     }
-
 }
+
+// ======================================================
+// BROADCAST
+// ======================================================
 
 function broadcast(room, data) {
-
     if (!room) return;
 
     for (const player of room.players.values()) {
-
         send(player.ws, data);
-
     }
-
 }
+
+// ======================================================
+// BROADCAST EXCEPT
+// ======================================================
 
 function broadcastExcept(room, playerId, data) {
-
     if (!room) return;
 
     for (const player of room.players.values()) {
-
         if (player.id !== playerId) {
-
             send(player.ws, data);
-
         }
-
     }
-
 }
 
-function getTotalPlayers() {
+// ======================================================
+// TOTAL PLAYERS
+// ======================================================
 
+function getTotalPlayers() {
     let total = 0;
 
     for (const room of rooms.values()) {
-
-        for (const player of room.players.values()) {
-
-            if (player.connected) {
-
-                total++;
-
-            }
-
-        }
-
+        total += room.players.size;
     }
 
     return total;
-
 }
 
-function generateRoomId() {
+// ======================================================
+// ROOM ID
+// ======================================================
 
+function generateRoomId() {
     let id;
 
     do {
-
         id =
             Math.random()
                 .toString(36)
@@ -150,217 +141,167 @@ function generateRoomId() {
     } while (rooms.has(id));
 
     return id;
-
 }
+
+// ======================================================
+// PLAYER ID
+// ======================================================
 
 function generatePlayerId() {
-
     return (
         Math.random()
             .toString(36)
-            .substring(2, 12)
-        +
+            .substring(2, 12) +
         Date.now().toString(36)
     );
-
 }
+
+// ======================================================
+// RECONNECT TOKEN
+// ======================================================
 
 function generateReconnectToken() {
-
     return (
         Math.random()
             .toString(36)
-            .substring(2, 18)
-        +
-        Date.now().toString(36)
+            .substring(2) +
+        Math.random()
+            .toString(36)
+            .substring(2)
     );
-
-}
-
-function randomDice() {
-
-    return Math.floor(Math.random() * 6) + 1;
-
-}
-
-// ======================================================
-// COLORS
-// ======================================================
-
-const COLORS = [
-    "red",
-    "green",
-    "yellow",
-    "blue"
-];
-
-function getPlayerColor(index) {
-
-    return COLORS[index] || "red";
-
-}
-
-// ======================================================
-// SAFE CELLS
-// استاندارد لودو
-// در صورت متفاوت بودن صفحه بازی، کلاینت می‌تواند
-// موقعیت تصویری خودش را مدیریت کند.
-// ======================================================
-
-const SAFE_PROGRESS = new Set([
-    0
-]);
-
-// ======================================================
-// CREATE PLAYER
-// ======================================================
-
-function createPlayer({
-    id,
-    name,
-    index
-}) {
-
-    return {
-
-        id,
-
-        ws: null,
-
-        name:
-            String(name || "")
-                .trim()
-                .substring(0, 20)
-            ||
-            `Player ${index + 1}`,
-
-        index,
-
-        color:
-            getPlayerColor(index),
-
-        ready: false,
-
-        connected: true,
-
-        reconnectToken:
-            generateReconnectToken(),
-
-        disconnectedAt: null,
-
-        // چهار مهره
-        pieces: [
-            { progress: -1 },
-            { progress: -1 },
-            { progress: -1 },
-            { progress: -1 }
-        ],
-
-        finished: false,
-
-        rank: null,
-
-        timeoutCount: 0
-
-    };
-
 }
 
 // ======================================================
 // CREATE ROOM
 // ======================================================
 
-function createRoom(roomId) {
-
+function createRoom(id) {
     return {
-
-        id: roomId,
+        id,
 
         players: new Map(),
-
-        createdAt: Date.now(),
-
-        lastActivity: Date.now(),
 
         gameStarted: false,
 
         gameFinished: false,
 
-        currentPlayerIndex: 0,
+        hostId: null,
 
         currentPlayerId: null,
 
+        currentPlayerIndex: 0,
+
         dice: null,
-
-        dicePlayerId: null,
-
-        waitingForPiece: false,
 
         turn: 0,
 
-        turnStartedAt: null,
-
-        turnTime: TURN_TIME,
-
-        rankings: [],
-
         lastMove: null,
 
-        winner: null,
+        createdAt: Date.now(),
 
-        stateVersion: 1
+        updatedAt: Date.now(),
 
+        // وضعیت کامل بازی
+        gameState: {
+            turn: 0,
+            dice: null,
+            lastMove: null,
+            rankings: [],
+            eliminated: [false, false, false, false]
+        }
     };
-
 }
 
 // ======================================================
-// ROOM PLAYERS
+// PLAYER INDEX
+// ======================================================
+
+function getPlayerIndex(room, playerId) {
+    if (!room) return -1;
+
+    const players =
+        Array.from(room.players.values());
+
+    return players.findIndex(
+        player => player.id === playerId
+    );
+}
+
+// ======================================================
+// PLAYER COLOR
+// ======================================================
+
+function getPlayerColor(index) {
+    return (
+        PLAYER_COLORS[index] ||
+        "red"
+    );
+}
+
+// ======================================================
+// SAFE PLAYER INFO
 // ======================================================
 
 function getPlayers(room) {
+    if (!room) return [];
 
-    return Array.from(
-        room.players.values()
-    ).map(player => ({
+    return Array
+        .from(room.players.values())
+        .map((player, index) => ({
+            id: player.id,
 
-        id: player.id,
+            index,
 
-        index: player.index,
+            name:
+                player.name ||
+                `Player ${index + 1}`,
 
-        name: player.name,
+            color:
+                player.color ||
+                getPlayerColor(index),
 
-        color: player.color,
+            ready:
+                !!player.ready,
 
-        ready: player.ready,
+            connected:
+                !!player.connected,
 
-        connected: player.connected,
-
-        finished: player.finished,
-
-        rank: player.rank,
-
-        timeoutCount: player.timeoutCount
-
-    }));
-
+            isHost:
+                player.id === room.hostId
+        }));
 }
 
 // ======================================================
-// PUBLIC GAME STATE
+// ROOM STATE
 // ======================================================
 
-function getPublicGameState(room) {
+function getRoomState(room) {
+    if (!room) return null;
 
     return {
+        type: "room_state",
 
         roomId: room.id,
+
+        players: getPlayers(room),
+
+        playerCount:
+            room.players.size,
+
+        maxPlayers:
+            MAX_PLAYERS,
+
+        minPlayers:
+            MIN_PLAYERS,
 
         gameStarted:
             room.gameStarted,
 
         gameFinished:
             room.gameFinished,
+
+        hostId:
+            room.hostId,
 
         currentPlayerId:
             room.currentPlayerId,
@@ -371,114 +312,28 @@ function getPublicGameState(room) {
         dice:
             room.dice,
 
-        dicePlayerId:
-            room.dicePlayerId,
-
-        waitingForPiece:
-            room.waitingForPiece,
-
         turn:
             room.turn,
-
-        turnStartedAt:
-            room.turnStartedAt,
-
-        turnTime:
-            room.turnTime,
-
-        rankings:
-            [...room.rankings],
-
-        winner:
-            room.winner,
 
         lastMove:
             room.lastMove,
 
-        players:
-            getPlayers(room),
-
-        stateVersion:
-            room.stateVersion
-
+        gameState:
+            room.gameState
     };
-
 }
 
 // ======================================================
-// SEND FULL STATE
+// SEND ROOM STATE
 // ======================================================
 
-function sendFullState(room) {
-
+function sendRoomState(room) {
     if (!room) return;
 
-    room.stateVersion++;
-
-    broadcast(room, {
-
-        type: "game_state",
-
-        state:
-            getPublicGameState(room)
-
-    });
-
-}
-
-// ======================================================
-// SEND PRIVATE PLAYER STATE
-// ======================================================
-
-function sendPrivateState(room, player) {
-
-    if (!room || !player) return;
-
-    send(player.ws, {
-
-        type: "player_state",
-
-        player: {
-
-            id: player.id,
-
-            index: player.index,
-
-            color: player.color,
-
-            name: player.name,
-
-            pieces:
-                player.pieces,
-
-            reconnectToken:
-                player.reconnectToken
-
-        }
-
-    });
-
-}
-
-// ======================================================
-// RESET PIECES
-// ======================================================
-
-function resetPlayerPieces(player) {
-
-    player.pieces = [
-
-        { progress: -1 },
-        { progress: -1 },
-        { progress: -1 },
-        { progress: -1 }
-
-    ];
-
-    player.finished = false;
-
-    player.rank = null;
-
+    broadcast(
+        room,
+        getRoomState(room)
+    );
 }
 
 // ======================================================
@@ -486,40 +341,25 @@ function resetPlayerPieces(player) {
 // ======================================================
 
 function startGame(room) {
-
     if (!room) return false;
 
-    if (room.players.size < MIN_PLAYERS) {
-
-        return false;
-
-    }
-
     if (room.gameStarted) {
-
         return false;
-
     }
 
     const players =
-        Array.from(room.players.values());
+        Array.from(room.players.values())
+            .filter(p => p.connected);
 
-    players.sort(
-        (a, b) =>
-            a.index - b.index
-    );
-
-    for (const player of players) {
-
-        resetPlayerPieces(player);
-
-        player.timeoutCount = 0;
-
+    if (players.length < MIN_PLAYERS) {
+        return false;
     }
 
     room.gameStarted = true;
 
     room.gameFinished = false;
+
+    room.turn = 1;
 
     room.currentPlayerIndex = 0;
 
@@ -528,116 +368,43 @@ function startGame(room) {
 
     room.dice = null;
 
-    room.dicePlayerId = null;
-
-    room.waitingForPiece = false;
-
-    room.turn = 1;
-
-    room.turnStartedAt =
-        Date.now();
-
-    room.rankings = [];
-
-    room.winner = null;
-
     room.lastMove = null;
 
-    room.lastActivity =
-        Date.now();
+    room.gameState = {
+        turn: 1,
+        dice: null,
+        lastMove: null,
+        rankings: [],
+        eliminated:
+            [false, false, false, false]
+    };
+
+    room.updatedAt = Date.now();
 
     broadcast(room, {
-
         type: "game_started",
 
-        state:
-            getPublicGameState(room)
+        roomId: room.id,
 
+        players:
+            getPlayers(room),
+
+        hostId:
+            room.hostId,
+
+        currentPlayerId:
+            room.currentPlayerId,
+
+        currentPlayerIndex:
+            room.currentPlayerIndex,
+
+        turn:
+            room.turn
     });
 
-    for (const player of players) {
-
-        sendPrivateState(
-            room,
-            player
-        );
-
-    }
+    sendRoomState(room);
 
     return true;
-
-}
-
-// ======================================================
-// ACTIVE PLAYERS
-// ======================================================
-
-function getActivePlayers(room) {
-
-    if (!room) return [];
-
-    return Array.from(
-        room.players.values()
-    ).filter(player => {
-
-        return (
-            player.connected &&
-            !player.finished
-        );
-
-    });
-
-}
-
-// ======================================================
-// NEXT ACTIVE PLAYER
-// ======================================================
-
-function findNextPlayer(room) {
-
-    const players =
-        Array.from(
-            room.players.values()
-        ).sort(
-            (a, b) =>
-                a.index - b.index
-        );
-
-    if (!players.length) {
-
-        return null;
-
-    }
-
-    let start =
-        room.currentPlayerIndex;
-
-    for (let i = 1; i <= players.length; i++) {
-
-        const index =
-            (start + i) %
-            players.length;
-
-        const player =
-            players.find(
-                p =>
-                    p.index === index
-            );
-
-        if (
-            player &&
-            player.connected &&
-            !player.finished
-        ) {
-
-            return player;
-
-        }
-
-    }
-
-    return null;
-
 }
 
 // ======================================================
@@ -645,943 +412,453 @@ function findNextPlayer(room) {
 // ======================================================
 
 function nextTurn(room) {
-
     if (!room) return;
 
-    if (room.gameFinished) return;
+    const players =
+        Array
+            .from(room.players.values())
+            .filter(p =>
+                p.connected &&
+                !p.eliminated
+            );
 
-    const next =
-        findNextPlayer(room);
-
-    if (!next) {
-
-        finishGame(room);
-
+    if (!players.length) {
+        room.currentPlayerId = null;
         return;
-
     }
 
+    let index =
+        players.findIndex(
+            p =>
+                p.id ===
+                room.currentPlayerId
+        );
+
+    if (index < 0) {
+        index = -1;
+    }
+
+    let nextIndex =
+        (index + 1) %
+        players.length;
+
     room.currentPlayerIndex =
-        next.index;
+        nextIndex;
 
     room.currentPlayerId =
-        next.id;
-
-    room.dice = null;
-
-    room.dicePlayerId = null;
-
-    room.waitingForPiece = false;
+        players[nextIndex].id;
 
     room.turn++;
 
-    room.turnStartedAt =
+    room.dice = null;
+
+    room.gameState.turn =
+        room.turn;
+
+    room.gameState.dice =
+        null;
+
+    room.updatedAt =
         Date.now();
 
-    room.lastActivity =
-        Date.now();
+    broadcast(room, {
+        type: "turn_changed",
 
-    sendFullState(room);
+        currentPlayerId:
+            room.currentPlayerId,
 
+        currentPlayerIndex:
+            room.currentPlayerIndex,
+
+        turn:
+            room.turn
+    });
 }
 
 // ======================================================
-// DICE
+// ROLL DICE
 // ======================================================
 
-function handleRollDice(
-    room,
-    playerId
-) {
-
+function rollDice(room, playerId) {
     if (!room) {
-
         return {
             success: false,
-            message: "اتاق پیدا نشد."
+            message: "اتاق وجود ندارد."
         };
-
     }
 
     if (!room.gameStarted) {
-
         return {
             success: false,
             message: "بازی هنوز شروع نشده است."
         };
-
     }
 
     if (room.gameFinished) {
-
         return {
             success: false,
             message: "بازی تمام شده است."
         };
-
     }
 
     if (
         room.currentPlayerId !==
         playerId
     ) {
-
         return {
             success: false,
             message: "الان نوبت شما نیست."
         };
-
     }
 
     if (room.dice !== null) {
-
         return {
             success: false,
             message: "تاس قبلاً ریخته شده است."
         };
-
-    }
-
-    const player =
-        room.players.get(playerId);
-
-    if (!player || !player.connected) {
-
-        return {
-            success: false,
-            message: "بازیکن متصل نیست."
-        };
-
     }
 
     const value =
-        randomDice();
+        Math.floor(
+            Math.random() * 6
+        ) + 1;
 
-    room.dice =
+    room.dice = value;
+
+    room.gameState.dice =
         value;
 
-    room.dicePlayerId =
-        playerId;
-
-    room.waitingForPiece =
-        true;
-
-    room.lastActivity =
+    room.updatedAt =
         Date.now();
 
     broadcast(room, {
-
-        type: "dice_rolled",
+        type: "dice",
 
         playerId,
+
+        playerIndex:
+            getPlayerIndex(
+                room,
+                playerId
+            ),
 
         value,
 
         turn:
             room.turn
-
     });
-
-    sendFullState(room);
 
     return {
         success: true,
         value
     };
-
 }
 
 // ======================================================
-// MOVE VALIDATION
+// VALIDATE MOVE
 // ======================================================
 
-function validateMove(
-    player,
-    pieceIndex,
-    dice
-) {
-
-    if (
-        !player ||
-        pieceIndex < 0 ||
-        pieceIndex > 3
-    ) {
-
-        return {
-            valid: false,
-            message: "مهره نامعتبر است."
-        };
-
-    }
-
-    if (
-        !Number.isInteger(dice) ||
-        dice < 1 ||
-        dice > 6
-    ) {
-
-        return {
-            valid: false,
-            message: "تاس نامعتبر است."
-        };
-
-    }
-
-    const piece =
-        player.pieces[pieceIndex];
-
-    const progress =
-        piece.progress;
-
-    // خانه
-    if (progress === -1) {
-
-        if (dice !== 6) {
-
-            return {
-                valid: false,
-                message:
-                    "برای خارج کردن مهره باید ۶ بیاورید."
-            };
-
-        }
-
-        return {
-            valid: true,
-            from: -1,
-            to: 0
-        };
-
-    }
-
-    // مهره قبلاً به پایان رسیده
-    if (progress === 58) {
-
-        return {
-            valid: false,
-            message:
-                "این مهره قبلاً به پایان رسیده است."
-        };
-
-    }
-
-    const next =
-        progress + dice;
-
-    // بیشتر از خانه آخر
-    if (next > 58) {
-
-        return {
-            valid: false,
-            message:
-                "عدد تاس برای این مهره زیاد است."
-        };
-
-    }
-
-    return {
-        valid: true,
-        from: progress,
-        to: next
-    };
-
-}
-
-// ======================================================
-// MOVE
-// ======================================================
-
-function handleMove(
-    room,
-    playerId,
-    move
-) {
-
+function validateMove(room, playerId, move) {
     if (!room) {
-
         return {
-            success: false,
+            valid: false,
             message: "اتاق پیدا نشد."
         };
-
     }
 
     if (!room.gameStarted) {
-
         return {
-            success: false,
+            valid: false,
             message: "بازی شروع نشده است."
         };
-
     }
 
     if (room.gameFinished) {
-
         return {
-            success: false,
+            valid: false,
             message: "بازی تمام شده است."
         };
-
     }
 
     if (
         room.currentPlayerId !==
         playerId
     ) {
-
         return {
-            success: false,
+            valid: false,
             message: "الان نوبت شما نیست."
         };
+    }
 
+    if (room.dice === null) {
+        return {
+            valid: false,
+            message: "ابتدا تاس بریزید."
+        };
     }
 
     if (
-        room.dice === null ||
-        room.dicePlayerId !== playerId
+        !move ||
+        typeof move !== "object"
     ) {
-
         return {
-            success: false,
-            message:
-                "ابتدا تاس بریزید."
+            valid: false,
+            message: "اطلاعات حرکت نامعتبر است."
         };
-
     }
 
-    const player =
-        room.players.get(playerId);
+    return {
+        valid: true
+    };
+}
 
-    if (!player) {
+// ======================================================
+// MAKE MOVE
+// ======================================================
 
-        return {
-            success: false,
-            message: "بازیکن پیدا نشد."
-        };
-
-    }
-
-    const pieceIndex =
-        Number(
-            move &&
-            move.pieceIndex
-        );
-
-    if (
-        !Number.isInteger(pieceIndex)
-    ) {
-
-        return {
-            success: false,
-            message:
-                "شماره مهره نامعتبر است."
-        };
-
-    }
-
-    const dice =
-        room.dice;
-
+function makeMove(room, playerId, moveData) {
     const validation =
         validateMove(
-            player,
-            pieceIndex,
-            dice
+            room,
+            playerId,
+            moveData
         );
 
     if (!validation.valid) {
-
         return {
             success: false,
             message:
                 validation.message
         };
-
     }
 
-    const piece =
-        player.pieces[pieceIndex];
+    const dice =
+        room.dice;
 
-    const oldProgress =
-        piece.progress;
+    const playerIndex =
+        getPlayerIndex(
+            room,
+            playerId
+        );
 
-    const newProgress =
-        validation.to;
-
-    piece.progress =
-        newProgress;
-
-    // -----------------------------------------------
-    // MOVE DATA
-    // -----------------------------------------------
-
-    room.lastMove = {
-
+    const move = {
         playerId,
 
-        playerIndex:
-            player.index,
-
-        pieceIndex,
+        playerIndex,
 
         dice,
 
-        from:
-            oldProgress,
+        data:
+            moveData || null,
 
-        to:
-            newProgress,
+        turn:
+            room.turn,
 
         time:
             Date.now()
-
     };
 
-    room.lastActivity =
+    room.lastMove =
+        move;
+
+    room.gameState.lastMove =
+        move;
+
+    room.gameState.dice =
+        dice;
+
+    room.updatedAt =
         Date.now();
 
-    // -----------------------------------------------
-    // CHECK PLAYER FINISHED
-    // -----------------------------------------------
-
-    const finished =
-        player.pieces.every(
-            p =>
-                p.progress === 58
-        );
-
-    if (finished) {
-
-        player.finished = true;
-
-        if (!room.rankings.includes(
-            player.index
-        )) {
-
-            room.rankings.push(
-                player.index
-            );
-
-        }
-
-        player.rank =
-            room.rankings.length;
-
-    }
-
-    // -----------------------------------------------
-    // CAPTURE
-    // -----------------------------------------------
-
-    let captured = [];
-
-    if (
-        newProgress >= 0 &&
-        newProgress < 52
-    ) {
-
-        captured =
-            capturePlayers(
-                room,
-                player,
-                pieceIndex
-            );
-
-    }
-
-    // -----------------------------------------------
-    // BROADCAST MOVE
-    // -----------------------------------------------
-
+    // ارسال حرکت به همه
     broadcast(room, {
-
         type: "move",
 
         playerId,
 
-        playerIndex:
-            player.index,
-
-        pieceIndex,
+        playerIndex,
 
         dice,
 
-        from:
-            oldProgress,
+        move:
+            moveData || null,
 
-        to:
-            newProgress,
-
-        captured,
-
-        finished:
-            player.finished,
-
-        rank:
-            player.rank,
-
-        rankings:
-            [...room.rankings]
-
+        turn:
+            room.turn
     });
 
-    // -----------------------------------------------
-    // GAME FINISH
-    // -----------------------------------------------
-
-    const active =
-        getActivePlayers(room);
-
-    if (
-        active.length <= 1
-    ) {
-
-        if (
-            active.length === 1
-        ) {
-
-            const last =
-                active[0];
-
-            if (
-                !room.rankings.includes(
-                    last.index
-                )
-            ) {
-
-                room.rankings.push(
-                    last.index
-                );
-
-                last.rank =
-                    room.rankings.length;
-
-            }
-
-        }
-
-        finishGame(room);
-
-        return {
-            success: true
-        };
-
-    }
-
-    // -----------------------------------------------
-    // EXTRA TURN ON SIX
-    // -----------------------------------------------
-
-    if (
-        dice === 6 &&
-        !player.finished
-    ) {
-
-        room.dice =
-            null;
-
-        room.dicePlayerId =
-            null;
-
-        room.waitingForPiece =
-            false;
-
-        room.turnStartedAt =
-            Date.now();
-
-        sendFullState(room);
-
-        return {
-            success: true,
-            extraTurn: true
-        };
-
-    }
-
-    // -----------------------------------------------
-    // NEXT PLAYER
-    // -----------------------------------------------
-
-    nextTurn(room);
+    /*
+     * فعلاً اجازه می‌دهیم کلاینت
+     * نتیجه حرکت مهره را محاسبه کند.
+     *
+     * بعد از دریافت state_update
+     * وضعیت جدید بازی در سرور ذخیره می‌شود.
+     */
 
     return {
-        success: true,
-        extraTurn: false
+        success: true
     };
-
 }
 
 // ======================================================
-// CAPTURE
+// UPDATE GAME STATE
 // ======================================================
 
-function capturePlayers(
+function updateGameState(
     room,
-    attacker,
-    attackerPieceIndex
+    playerId,
+    state
 ) {
-
-    const captured = [];
-
-    const attackerPiece =
-        attacker.pieces[
-            attackerPieceIndex
-        ];
-
-    const attackerProgress =
-        attackerPiece.progress;
-
-    for (
-        const opponent
-        of room.players.values()
-    ) {
-
-        if (
-            opponent.id ===
-            attacker.id
-        ) continue;
-
-        if (
-            !opponent.connected
-        ) continue;
-
-        for (
-            let i = 0;
-            i < opponent.pieces.length;
-            i++
-        ) {
-
-            const piece =
-                opponent.pieces[i];
-
-            if (
-                piece.progress < 0 ||
-                piece.progress >= 52
-            ) {
-
-                continue;
-
-            }
-
-            // ------------------------------------------------
-            // استاندارد چندنفره:
-            // مسیر اصلی با شروع‌های 0 / 13 / 26 / 39
-            // ------------------------------------------------
-
-            const attackerBoard =
-                getBoardPosition(
-                    attacker.index,
-                    attackerProgress
-                );
-
-            const opponentBoard =
-                getBoardPosition(
-                    opponent.index,
-                    piece.progress
-                );
-
-            if (
-                attackerBoard !== null &&
-                opponentBoard !== null &&
-                attackerBoard ===
-                opponentBoard
-            ) {
-
-                // خانه امن
-                if (
-                    isSafeBoardPosition(
-                        attackerBoard
-                    )
-                ) {
-
-                    continue;
-
-                }
-
-                piece.progress = -1;
-
-                captured.push({
-
-                    playerId:
-                        opponent.id,
-
-                    playerIndex:
-                        opponent.index,
-
-                    pieceIndex:
-                        i
-
-                });
-
-            }
-
-        }
-
+    if (!room) {
+        return {
+            success: false,
+            message: "اتاق پیدا نشد."
+        };
     }
 
-    return captured;
-
-}
-
-// ======================================================
-// BOARD POSITION
-// ======================================================
-
-function getBoardPosition(
-    playerIndex,
-    progress
-) {
+    if (!room.gameStarted) {
+        return {
+            success: false,
+            message: "بازی شروع نشده است."
+        };
+    }
 
     if (
-        progress < 0 ||
-        progress >= 52
+        room.currentPlayerId !==
+        playerId
     ) {
-
-        return null;
-
+        return {
+            success: false,
+            message: "فقط بازیکن فعلی می‌تواند وضعیت را ارسال کند."
+        };
     }
 
-    const starts = [
-        0,
-        13,
-        26,
-        39
-    ];
+    if (
+        !state ||
+        typeof state !== "object"
+    ) {
+        return {
+            success: false,
+            message: "وضعیت بازی نامعتبر است."
+        };
+    }
 
-    const start =
-        starts[playerIndex] || 0;
+    /*
+     * فقط بخش‌هایی که واقعاً
+     * از game.js می‌آیند ذخیره می‌شوند.
+     */
 
-    return (
-        start +
-        progress
-    ) % 52;
+    if (
+        state.pieces !== undefined
+    ) {
+        room.gameState.pieces =
+            state.pieces;
+    }
 
-}
+    if (
+        state.rankings !== undefined
+    ) {
+        room.gameState.rankings =
+            state.rankings;
+    }
 
-// ======================================================
-// SAFE BOARD POSITIONS
-// ======================================================
+    if (
+        state.eliminated !== undefined
+    ) {
+        room.gameState.eliminated =
+            state.eliminated;
+    }
 
-const SAFE_BOARD_POSITIONS = new Set([
-    0,
-    8,
-    13,
-    21,
-    26,
-    34,
-    39,
-    47
-]);
+    if (
+        state.currentPlayer !== undefined
+    ) {
+        room.gameState.currentPlayer =
+            state.currentPlayer;
+    }
 
-function isSafeBoardPosition(
-    position
-) {
+    if (
+        state.gameFinished !== undefined
+    ) {
+        room.gameFinished =
+            !!state.gameFinished;
+    }
 
-    return SAFE_BOARD_POSITIONS.has(
-        position
+    room.updatedAt =
+        Date.now();
+
+    broadcastExcept(
+        room,
+        playerId,
+        {
+            type: "state_update",
+
+            playerId,
+
+            state:
+                room.gameState
+        }
     );
 
+    if (room.gameFinished) {
+        broadcast(room, {
+            type: "game_finished",
+
+            rankings:
+                room.gameState.rankings ||
+                []
+        });
+    }
+
+    return {
+        success: true
+    };
 }
 
 // ======================================================
 // FINISH GAME
 // ======================================================
 
-function finishGame(room) {
-
+function finishGame(
+    room,
+    playerId,
+    rankings
+) {
     if (!room) return;
 
-    if (room.gameFinished) return;
-
-    room.gameFinished =
-        true;
-
-    room.gameStarted =
-        true;
-
-    room.dice =
-        null;
-
-    room.dicePlayerId =
-        null;
-
-    room.waitingForPiece =
-        false;
-
-    room.turnStartedAt =
-        null;
-
-    // آخرین بازیکن باقی مانده
-    const active =
-        getActivePlayers(room);
-
     if (
-        active.length === 1
+        room.currentPlayerId !==
+        playerId
     ) {
-
-        const winner =
-            active[0];
-
-        if (
-            !room.rankings.includes(
-                winner.index
-            )
-        ) {
-
-            room.rankings.push(
-                winner.index
-            );
-
-            winner.rank =
-                room.rankings.length;
-
-        }
-
+        return {
+            success: false,
+            message: "نوبت این بازیکن نیست."
+        };
     }
 
-    room.winner =
-        room.rankings.length
-            ? room.rankings[0]
-            : null;
+    room.gameFinished = true;
 
-    room.lastActivity =
+    room.gameState.rankings =
+        Array.isArray(rankings)
+            ? rankings
+            : room.gameState.rankings;
+
+    room.updatedAt =
         Date.now();
 
     broadcast(room, {
-
         type: "game_finished",
 
         rankings:
-            [...room.rankings],
-
-        winner:
-            room.winner,
-
-        state:
-            getPublicGameState(room)
-
+            room.gameState.rankings
     });
 
+    return {
+        success: true
+    };
 }
 
 // ======================================================
-// TIMEOUT
-// ======================================================
-
-function checkTurnTimeout(room) {
-
-    if (!room) return;
-
-    if (!room.gameStarted) return;
-
-    if (room.gameFinished) return;
-
-    if (!room.turnStartedAt) return;
-
-    const elapsed =
-        Date.now() -
-        room.turnStartedAt;
-
-    if (
-        elapsed <
-        room.turnTime * 1000
-    ) {
-
-        return;
-
-    }
-
-    const player =
-        room.players.get(
-            room.currentPlayerId
-        );
-
-    if (!player) {
-
-        nextTurn(room);
-
-        return;
-
-    }
-
-    player.timeoutCount++;
-
-    broadcast(room, {
-
-        type: "turn_timeout",
-
-        playerId:
-            player.id,
-
-        playerIndex:
-            player.index,
-
-        timeoutCount:
-            player.timeoutCount
-
-    });
-
-    // بعد از سه timeout حذف
-    if (
-        player.timeoutCount >= 3
-    ) {
-
-        player.finished = true;
-
-        if (
-            !room.rankings.includes(
-                player.index
-            )
-        ) {
-
-            room.rankings.push(
-                player.index
-            );
-
-            player.rank =
-                room.rankings.length;
-
-        }
-
-        broadcast(room, {
-
-            type: "player_eliminated",
-
-            playerId:
-                player.id,
-
-            playerIndex:
-                player.index,
-
-            reason:
-                "timeout",
-
-            rank:
-                player.rank
-
-        });
-
-    }
-
-    const active =
-        getActivePlayers(room);
-
-    if (
-        active.length <= 1
-    ) {
-
-        finishGame(room);
-
-        return;
-
-    }
-
-    nextTurn(room);
-
-}
-
-// ======================================================
-// READY
+// PLAYER READY
 // ======================================================
 
 function setReady(
@@ -1589,7 +866,6 @@ function setReady(
     playerId,
     ready
 ) {
-
     if (!room) return;
 
     const player =
@@ -1599,768 +875,208 @@ function setReady(
 
     if (!player) return;
 
-    if (room.gameStarted) {
-
-        return;
-
-    }
-
     player.ready =
         ready !== false;
 
-    room.lastActivity =
+    room.updatedAt =
         Date.now();
-
-    broadcast(room, {
-
-        type: "player_ready",
-
-        playerId,
-
-        ready:
-            player.ready
-
-    });
 
     sendRoomState(room);
 
-    const players =
-        Array.from(
-            room.players.values()
-        );
-
     const readyPlayers =
-        players.filter(
-            p =>
-                p.ready
-        );
+        Array
+            .from(room.players.values())
+            .filter(
+                p =>
+                    p.ready &&
+                    p.connected
+            );
 
     if (
         readyPlayers.length >=
-        MIN_PLAYERS
+        MIN_PLAYERS &&
+        !room.gameStarted
     ) {
-
         startGame(room);
-
     }
-
 }
 
 // ======================================================
-// ROOM STATE
+// SET NAME
 // ======================================================
 
-function sendRoomState(room) {
-
+function setPlayerName(
+    room,
+    playerId,
+    name
+) {
     if (!room) return;
-
-    broadcast(room, {
-
-        type: "room_state",
-
-        roomId:
-            room.id,
-
-        players:
-            getPlayers(room),
-
-        playerCount:
-            room.players.size,
-
-        connectedPlayers:
-            getTotalConnectedPlayers(room),
-
-        maxPlayers:
-            MAX_PLAYERS,
-
-        gameStarted:
-            room.gameStarted,
-
-        gameFinished:
-            room.gameFinished
-
-    });
-
-}
-
-function getTotalConnectedPlayers(room) {
-
-    if (!room) return 0;
-
-    let count = 0;
-
-    for (
-        const player
-        of room.players.values()
-    ) {
-
-        if (player.connected) {
-
-            count++;
-
-        }
-
-    }
-
-    return count;
-
-}
-
-// ======================================================
-// CREATE ROOM
-// ======================================================
-
-function handleCreateRoom(
-    ws,
-    message,
-    connection
-) {
-
-    if (connection.room) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "شما قبلاً داخل یک اتاق هستید."
-
-        });
-
-        return;
-
-    }
-
-    const roomId =
-        generateRoomId();
-
-    const room =
-        createRoom(roomId);
-
-    const player =
-        createPlayer({
-
-            id:
-                generatePlayerId(),
-
-            name:
-                message.name,
-
-            index:
-                0
-
-        });
-
-    player.ws =
-        ws;
-
-    room.players.set(
-        player.id,
-        player
-    );
-
-    rooms.set(
-        roomId,
-        room
-    );
-
-    connection.room =
-        room;
-
-    connection.playerId =
-        player.id;
-
-    send(ws, {
-
-        type:
-            "room_created",
-
-        roomId,
-
-        playerId:
-            player.id,
-
-        reconnectToken:
-            player.reconnectToken,
-
-        color:
-            player.color
-
-    });
-
-    sendRoomState(room);
-
-    sendPrivateState(
-        room,
-        player
-    );
-
-}
-
-// ======================================================
-// JOIN ROOM
-// ======================================================
-
-function handleJoinRoom(
-    ws,
-    message,
-    connection
-) {
-
-    if (connection.room) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "شما قبلاً داخل یک اتاق هستید."
-
-        });
-
-        return;
-
-    }
-
-    const roomId =
-        String(
-            message.roomId || ""
-        )
-        .trim()
-        .toUpperCase();
-
-    if (!roomId) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "کد اتاق وارد نشده است."
-
-        });
-
-        return;
-
-    }
-
-    const room =
-        rooms.get(roomId);
-
-    if (!room) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "اتاق پیدا نشد."
-
-        });
-
-        return;
-
-    }
-
-    if (room.gameFinished) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "این بازی تمام شده است."
-
-        });
-
-        return;
-
-    }
-
-    // بازیکنان disconnected را حساب می‌کنیم
-    // تا امکان reconnect داشته باشند.
-    const players =
-        Array.from(
-            room.players.values()
-        );
-
-    if (
-        players.length >=
-        MAX_PLAYERS
-    ) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "اتاق پر است."
-
-        });
-
-        return;
-
-    }
-
-    const index =
-        players.length;
-
-    const player =
-        createPlayer({
-
-            id:
-                generatePlayerId(),
-
-            name:
-                message.name,
-
-            index
-
-        });
-
-    player.ws =
-        ws;
-
-    room.players.set(
-        player.id,
-        player
-    );
-
-    connection.room =
-        room;
-
-    connection.playerId =
-        player.id;
-
-    room.lastActivity =
-        Date.now();
-
-    send(ws, {
-
-        type:
-            "joined_room",
-
-        roomId:
-            room.id,
-
-        playerId:
-            player.id,
-
-        reconnectToken:
-            player.reconnectToken,
-
-        index:
-            player.index,
-
-        color:
-            player.color
-
-    });
-
-    sendRoomState(room);
-
-    sendPrivateState(
-        room,
-        player
-    );
-
-}
-
-// ======================================================
-// RECONNECT
-// ======================================================
-
-function handleReconnect(
-    ws,
-    message,
-    connection
-) {
-
-    const roomId =
-        String(
-            message.roomId || ""
-        )
-        .trim()
-        .toUpperCase();
-
-    const token =
-        String(
-            message.reconnectToken || ""
-        );
-
-    if (!roomId || !token) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "اطلاعات اتصال مجدد ناقص است."
-
-        });
-
-        return;
-
-    }
-
-    const room =
-        rooms.get(roomId);
-
-    if (!room) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "اتاق پیدا نشد."
-
-        });
-
-        return;
-
-    }
-
-    let player = null;
-
-    for (
-        const p
-        of room.players.values()
-    ) {
-
-        if (
-            p.reconnectToken ===
-            token
-        ) {
-
-            player = p;
-
-            break;
-
-        }
-
-    }
-
-    if (!player) {
-
-        send(ws, {
-
-            type: "error",
-
-            message:
-                "توکن اتصال مجدد معتبر نیست."
-
-        });
-
-        return;
-
-    }
-
-    player.ws =
-        ws;
-
-    player.connected =
-        true;
-
-    player.disconnectedAt =
-        null;
-
-    connection.room =
-        room;
-
-    connection.playerId =
-        player.id;
-
-    room.lastActivity =
-        Date.now();
-
-    send(ws, {
-
-        type:
-            "reconnected",
-
-        roomId:
-            room.id,
-
-        playerId:
-            player.id,
-
-        index:
-            player.index,
-
-        color:
-            player.color,
-
-        reconnectToken:
-            player.reconnectToken
-
-    });
-
-    sendPrivateState(
-        room,
-        player
-    );
-
-    send(ws, {
-
-        type:
-            "game_state",
-
-        state:
-            getPublicGameState(room)
-
-    });
-
-    broadcastExcept(
-        room,
-        player.id,
-        {
-
-            type:
-                "player_reconnected",
-
-            playerId:
-                player.id,
-
-            playerIndex:
-                player.index
-
-        }
-    );
-
-}
-
-// ======================================================
-// LEAVE ROOM
-// ======================================================
-
-function leaveRoom(
-    connection,
-    permanent = false
-) {
-
-    const room =
-        connection.room;
-
-    const playerId =
-        connection.playerId;
-
-    if (!room || !playerId) {
-
-        return;
-
-    }
 
     const player =
         room.players.get(
             playerId
         );
 
-    if (!player) {
+    if (!player) return;
 
-        return;
+    const cleanName =
+        String(name || "")
+            .trim()
+            .substring(0, 20);
 
+    if (cleanName) {
+        player.name =
+            cleanName;
     }
 
-    // --------------------------------------------------
-    // اتصال قطع شده:
-    // بازیکن را فوراً حذف نمی‌کنیم.
-    // امکان reconnect دارد.
-    // --------------------------------------------------
+    room.updatedAt =
+        Date.now();
 
-    if (!permanent) {
-
-        player.connected =
-            false;
-
-        player.ws =
-            null;
-
-        player.disconnectedAt =
-            Date.now();
-
-        broadcastExcept(
-            room,
-            player.id,
-            {
-
-                type:
-                    "player_disconnected",
-
-                playerId:
-                    player.id,
-
-                playerIndex:
-                    player.index
-
-            }
-        );
-
-        sendRoomState(room);
-
-        // اگر نوبت خودش بود،
-        // نفر بعدی بعد از کمی زمان.
-        if (
-            room.currentPlayerId ===
-            player.id &&
-            room.gameStarted &&
-            !room.gameFinished
-        ) {
-
-            setTimeout(
-                () => {
-
-                    if (!rooms.has(room.id)) {
-                        return;
-                    }
-
-                    const current =
-                        room.players.get(
-                            player.id
-                        );
-
-                    if (
-                        current &&
-                        !current.connected &&
-                        room.currentPlayerId ===
-                        player.id
-                    ) {
-
-                        nextTurn(room);
-
-                    }
-
-                },
-                3000
-            );
-
-        }
-
-        return;
-
-    }
-
-    // --------------------------------------------------
-    // حذف کامل
-    // --------------------------------------------------
-
-    room.players.delete(
-        playerId
-    );
-
-    broadcast(
-        room,
-        {
-
-            type:
-                "player_left",
-
-            playerId,
-
-            playerIndex:
-                player.index
-
-        }
-    );
-
-    if (
-        room.players.size === 0
-    ) {
-
-        rooms.delete(
-            room.id
-        );
-
-        return;
-
-    }
-
-    if (
-        room.currentPlayerId ===
-        playerId &&
-        room.gameStarted &&
-        !room.gameFinished
-    ) {
-
-        nextTurn(room);
-
-    } else {
-
-        sendRoomState(room);
-
-    }
-
+    sendRoomState(room);
 }
 
 // ======================================================
-// MESSAGE HANDLER
+// CREATE PLAYER
+// ======================================================
+
+function createPlayer(
+    ws,
+    room,
+    name
+) {
+    const index =
+        room.players.size;
+
+    const player = {
+        id:
+            generatePlayerId(),
+
+        reconnectToken:
+            generateReconnectToken(),
+
+        ws,
+
+        name:
+            String(name || "")
+                .trim()
+                .substring(0, 20) ||
+            `Player ${index + 1}`,
+
+        color:
+            getPlayerColor(index),
+
+        ready: false,
+
+        connected: true,
+
+        eliminated: false,
+
+        disconnectedAt: null
+    };
+
+    room.players.set(
+        player.id,
+        player
+    );
+
+    return player;
+}
+
+// ======================================================
+// SEND PLAYER DATA
+// ======================================================
+
+function sendPlayerData(
+    ws,
+    room,
+    player
+) {
+    send(ws, {
+        type: "player_info",
+
+        roomId:
+            room.id,
+
+        playerId:
+            player.id,
+
+        reconnectToken:
+            player.reconnectToken,
+
+        color:
+            player.color,
+
+        index:
+            getPlayerIndex(
+                room,
+                player.id
+            )
+    });
+}
+
+// ======================================================
+// CONNECTION
 // ======================================================
 
 wss.on(
     "connection",
-    (ws, request) => {
+    (ws) => {
 
-        const connection = {
+        let currentRoom = null;
+        let playerId = null;
 
-            ws,
+        ws.isAlive = true;
 
-            room: null,
+        // ------------------------------------------------
+        // PONG
+        // ------------------------------------------------
 
-            playerId: null
-
-        };
+        ws.on("pong", () => {
+            ws.isAlive = true;
+        });
 
         // ------------------------------------------------
         // CONNECTED
         // ------------------------------------------------
 
         send(ws, {
-
-            type:
-                "connected",
+            type: "connected",
 
             message:
                 "اتصال به سرور برقرار شد.",
 
-            serverTime:
-                Date.now(),
-
             version:
-                "3.0.0"
+                "3.0.0",
 
+            serverTime:
+                Date.now()
         });
 
-        // ------------------------------------------------
+        // =================================================
         // MESSAGE
-        // ------------------------------------------------
+        // =================================================
 
         ws.on(
             "message",
-            raw => {
+            (raw) => {
 
                 let message;
 
                 try {
-
                     message =
                         JSON.parse(
                             raw.toString()
                         );
-
                 } catch (error) {
 
                     send(ws, {
-
-                        type:
-                            "error",
+                        type: "error",
 
                         message:
                             "پیام نامعتبر است."
-
                     });
 
                     return;
-
                 }
 
                 if (
@@ -2369,17 +1085,13 @@ wss.on(
                 ) {
 
                     send(ws, {
-
-                        type:
-                            "error",
+                        type: "error",
 
                         message:
                             "نوع پیام مشخص نیست."
-
                     });
 
                     return;
-
                 }
 
                 // =========================================
@@ -2392,17 +1104,13 @@ wss.on(
                 ) {
 
                     send(ws, {
-
-                        type:
-                            "pong",
+                        type: "pong",
 
                         time:
                             Date.now()
-
                     });
 
                     return;
-
                 }
 
                 // =========================================
@@ -2414,14 +1122,76 @@ wss.on(
                     "create_room"
                 ) {
 
-                    handleCreateRoom(
+                    if (currentRoom) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "شما قبلاً داخل اتاق هستید."
+                        });
+
+                        return;
+                    }
+
+                    const roomId =
+                        generateRoomId();
+
+                    const room =
+                        createRoom(
+                            roomId
+                        );
+
+                    const player =
+                        createPlayer(
+                            ws,
+                            room,
+                            message.name
+                        );
+
+                    room.hostId =
+                        player.id;
+
+                    currentRoom =
+                        room;
+
+                    playerId =
+                        player.id;
+
+                    rooms.set(
+                        roomId,
+                        room
+                    );
+
+                    send(ws, {
+                        type:
+                            "room_created",
+
+                        roomId,
+
+                        playerId:
+                            player.id,
+
+                        reconnectToken:
+                            player.reconnectToken,
+
+                        color:
+                            player.color,
+
+                        index: 0
+                    });
+
+                    sendPlayerData(
                         ws,
-                        message,
-                        connection
+                        room,
+                        player
+                    );
+
+                    sendRoomState(
+                        room
                     );
 
                     return;
-
                 }
 
                 // =========================================
@@ -2433,14 +1203,145 @@ wss.on(
                     "join_room"
                 ) {
 
-                    handleJoinRoom(
+                    if (currentRoom) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "شما قبلاً داخل اتاق هستید."
+                        });
+
+                        return;
+                    }
+
+                    const roomId =
+                        String(
+                            message.roomId ||
+                            ""
+                        )
+                            .trim()
+                            .toUpperCase();
+
+                    const room =
+                        rooms.get(
+                            roomId
+                        );
+
+                    if (!room) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "اتاق پیدا نشد."
+                        });
+
+                        return;
+                    }
+
+                    if (
+                        room.gameStarted
+                    ) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "بازی این اتاق شروع شده است."
+                        });
+
+                        return;
+                    }
+
+                    if (
+                        room.players.size >=
+                        MAX_PLAYERS
+                    ) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "اتاق پر است."
+                        });
+
+                        return;
+                    }
+
+                    const player =
+                        createPlayer(
+                            ws,
+                            room,
+                            message.name
+                        );
+
+                    currentRoom =
+                        room;
+
+                    playerId =
+                        player.id;
+
+                    send(ws, {
+                        type:
+                            "joined_room",
+
+                        roomId:
+                            room.id,
+
+                        playerId:
+                            player.id,
+
+                        reconnectToken:
+                            player.reconnectToken,
+
+                        color:
+                            player.color,
+
+                        index:
+                            getPlayerIndex(
+                                room,
+                                player.id
+                            )
+                    });
+
+                    sendPlayerData(
                         ws,
-                        message,
-                        connection
+                        room,
+                        player
+                    );
+
+                    broadcast(
+                        room,
+                        {
+                            type:
+                                "player_joined",
+
+                            player:
+                                {
+                                    id:
+                                        player.id,
+
+                                    name:
+                                        player.name,
+
+                                    color:
+                                        player.color,
+
+                                    index:
+                                        getPlayerIndex(
+                                            room,
+                                            player.id
+                                        )
+                                }
+                        }
+                    );
+
+                    sendRoomState(
+                        room
                     );
 
                     return;
-
                 }
 
                 // =========================================
@@ -2452,14 +1353,124 @@ wss.on(
                     "reconnect"
                 ) {
 
-                    handleReconnect(
+                    const roomId =
+                        String(
+                            message.roomId ||
+                            ""
+                        )
+                            .trim()
+                            .toUpperCase();
+
+                    const token =
+                        String(
+                            message.reconnectToken ||
+                            ""
+                        );
+
+                    const room =
+                        rooms.get(
+                            roomId
+                        );
+
+                    if (!room) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "اتاق پیدا نشد."
+                        });
+
+                        return;
+                    }
+
+                    let found =
+                        null;
+
+                    for (
+                        const player
+                        of room.players.values()
+                    ) {
+
+                        if (
+                            player.reconnectToken ===
+                            token
+                        ) {
+
+                            found =
+                                player;
+
+                            break;
+                        }
+                    }
+
+                    if (!found) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "اطلاعات اتصال مجدد معتبر نیست."
+                        });
+
+                        return;
+                    }
+
+                    found.ws =
+                        ws;
+
+                    found.connected =
+                        true;
+
+                    found.disconnectedAt =
+                        null;
+
+                    currentRoom =
+                        room;
+
+                    playerId =
+                        found.id;
+
+                    send(ws, {
+                        type:
+                            "reconnected",
+
+                        roomId:
+                            room.id,
+
+                        playerId:
+                            found.id,
+
+                        color:
+                            found.color
+                    });
+
+                    sendPlayerData(
                         ws,
-                        message,
-                        connection
+                        room,
+                        found
+                    );
+
+                    send(
+                        ws,
+                        getRoomState(
+                            room
+                        )
+                    );
+
+                    broadcastExcept(
+                        room,
+                        found.id,
+                        {
+                            type:
+                                "player_reconnected",
+
+                            playerId:
+                                found.id
+                        }
                     );
 
                     return;
-
                 }
 
                 // =========================================
@@ -2472,48 +1483,27 @@ wss.on(
                 ) {
 
                     if (
-                        !connection.room
+                        !currentRoom ||
+                        !playerId
                     ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 "ابتدا وارد اتاق شوید."
-
                         });
 
                         return;
-
                     }
 
-                    const player =
-                        connection.room.players.get(
-                            connection.playerId
-                        );
-
-                    if (!player) return;
-
-                    player.name =
-                        String(
-                            message.name || ""
-                        )
-                        .trim()
-                        .substring(
-                            0,
-                            20
-                        )
-                        ||
-                        player.name;
-
-                    sendRoomState(
-                        connection.room
+                    setPlayerName(
+                        currentRoom,
+                        playerId,
+                        message.name
                     );
 
                     return;
-
                 }
 
                 // =========================================
@@ -2526,35 +1516,27 @@ wss.on(
                 ) {
 
                     if (
-                        !connection.room
+                        !currentRoom ||
+                        !playerId
                     ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 "ابتدا وارد اتاق شوید."
-
                         });
 
                         return;
-
                     }
 
                     setReady(
-
-                        connection.room,
-
-                        connection.playerId,
-
+                        currentRoom,
+                        playerId,
                         message.ready
-
                     );
 
                     return;
-
                 }
 
                 // =========================================
@@ -2567,67 +1549,67 @@ wss.on(
                 ) {
 
                     if (
-                        !connection.room
+                        !currentRoom ||
+                        !playerId
                     ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 "ابتدا وارد اتاق شوید."
-
                         });
 
                         return;
-
                     }
 
-                    const room =
-                        connection.room;
+                    if (
+                        currentRoom.hostId !==
+                        playerId
+                    ) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "فقط سازنده اتاق می‌تواند بازی را شروع کند."
+                        });
+
+                        return;
+                    }
 
                     if (
-                        room.players.size <
+                        currentRoom.players.size <
                         MIN_PLAYERS
                     ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 "حداقل ۲ بازیکن لازم است."
-
                         });
 
                         return;
-
                     }
 
                     if (
-                        room.gameStarted
+                        startGame(
+                            currentRoom
+                        )
                     ) {
 
-                        send(ws, {
-
-                            type:
-                                "error",
-
-                            message:
-                                "بازی قبلاً شروع شده است."
-
-                        });
-
                         return;
-
                     }
 
-                    startGame(room);
+                    send(ws, {
+                        type: "error",
+
+                        message:
+                            "شروع بازی انجام نشد."
+                    });
 
                     return;
-
                 }
 
                 // =========================================
@@ -2640,48 +1622,39 @@ wss.on(
                 ) {
 
                     if (
-                        !connection.room
+                        !currentRoom ||
+                        !playerId
                     ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 "ابتدا وارد اتاق شوید."
-
                         });
 
                         return;
-
                     }
 
                     const result =
-                        handleRollDice(
-
-                            connection.room,
-
-                            connection.playerId
-
+                        rollDice(
+                            currentRoom,
+                            playerId
                         );
 
-                    if (!result.success) {
+                    if (
+                        !result.success
+                    ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 result.message
-
                         });
-
                     }
 
                     return;
-
                 }
 
                 // =========================================
@@ -2694,50 +1667,157 @@ wss.on(
                 ) {
 
                     if (
-                        !connection.room
+                        !currentRoom ||
+                        !playerId
                     ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 "ابتدا وارد اتاق شوید."
-
                         });
 
                         return;
-
                     }
 
                     const result =
-                        handleMove(
-
-                            connection.room,
-
-                            connection.playerId,
-
-                            message.move || {}
-
+                        makeMove(
+                            currentRoom,
+                            playerId,
+                            message.move ||
+                                null
                         );
 
-                    if (!result.success) {
+                    if (
+                        !result.success
+                    ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 result.message
-
                         });
 
+                        return;
+                    }
+
+                    /*
+                     * فعلاً تغییر نوبت را
+                     * کلاینت بعد از اتمام
+                     * حرکت اعلام می‌کند.
+                     */
+
+                    return;
+                }
+
+                // =========================================
+                // STATE UPDATE
+                // =========================================
+
+                if (
+                    message.type ===
+                    "state_update"
+                ) {
+
+                    if (
+                        !currentRoom ||
+                        !playerId
+                    ) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "ابتدا وارد اتاق شوید."
+                        });
+
+                        return;
+                    }
+
+                    const result =
+                        updateGameState(
+                            currentRoom,
+                            playerId,
+                            message.state
+                        );
+
+                    if (
+                        !result.success
+                    ) {
+
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                result.message
+                        });
                     }
 
                     return;
+                }
 
+                // =========================================
+                // NEXT TURN
+                // =========================================
+
+                if (
+                    message.type ===
+                    "next_turn"
+                ) {
+
+                    if (
+                        !currentRoom ||
+                        !playerId
+                    ) {
+                        return;
+                    }
+
+                    if (
+                        currentRoom.currentPlayerId !==
+                        playerId
+                    ) {
+                        send(ws, {
+                            type: "error",
+
+                            message:
+                                "نوبت این بازیکن نیست."
+                        });
+
+                        return;
+                    }
+
+                    nextTurn(
+                        currentRoom
+                    );
+
+                    return;
+                }
+
+                // =========================================
+                // FINISH
+                // =========================================
+
+                if (
+                    message.type ===
+                    "game_finished"
+                ) {
+
+                    if (
+                        !currentRoom ||
+                        !playerId
+                    ) {
+                        return;
+                    }
+
+                    finishGame(
+                        currentRoom,
+                        playerId,
+                        message.rankings
+                    );
+
+                    return;
                 }
 
                 // =========================================
@@ -2750,58 +1830,31 @@ wss.on(
                 ) {
 
                     if (
-                        !connection.room
+                        !currentRoom
                     ) {
 
                         send(ws, {
-
-                            type:
-                                "error",
+                            type: "error",
 
                             message:
                                 "شما داخل اتاق نیستید."
-
                         });
 
                         return;
-
                     }
 
-                    send(ws, {
-
-                        type:
-                            "game_state",
-
-                        state:
-                            getPublicGameState(
-                                connection.room
-                            )
-
-                    });
-
-                    const player =
-                        connection.room.players.get(
-                            connection.playerId
-                        );
-
-                    if (player) {
-
-                        sendPrivateState(
-
-                            connection.room,
-
-                            player
-
-                        );
-
-                    }
+                    send(
+                        ws,
+                        getRoomState(
+                            currentRoom
+                        )
+                    );
 
                     return;
-
                 }
 
                 // =========================================
-                // LEAVE
+                // LEAVE ROOM
                 // =========================================
 
                 if (
@@ -2810,18 +1863,10 @@ wss.on(
                 ) {
 
                     leaveRoom(
-                        connection,
                         true
                     );
 
-                    connection.room =
-                        null;
-
-                    connection.playerId =
-                        null;
-
                     return;
-
                 }
 
                 // =========================================
@@ -2829,37 +1874,29 @@ wss.on(
                 // =========================================
 
                 send(ws, {
-
-                    type:
-                        "error",
+                    type: "error",
 
                     message:
                         `نوع پیام "${message.type}" شناخته نشد.`
-
                 });
-
             }
         );
 
-        // ------------------------------------------------
+        // =================================================
         // CLOSE
-        // ------------------------------------------------
+        // =================================================
 
         ws.on(
             "close",
             () => {
 
-                leaveRoom(
-                    connection,
-                    false
-                );
-
+                disconnectPlayer();
             }
         );
 
-        // ------------------------------------------------
+        // =================================================
         // ERROR
-        // ------------------------------------------------
+        // =================================================
 
         ws.on(
             "error",
@@ -2869,18 +1906,303 @@ wss.on(
                     "WebSocket error:",
                     error.message
                 );
-
             }
         );
 
+        // =================================================
+        // DISCONNECT
+        // =================================================
+
+        function disconnectPlayer() {
+
+            if (
+                !currentRoom ||
+                !playerId
+            ) {
+                return;
+            }
+
+            const room =
+                currentRoom;
+
+            const player =
+                room.players.get(
+                    playerId
+                );
+
+            if (!player) {
+                return;
+            }
+
+            /*
+             * اگر اتصال قطع شد،
+             * بازیکن را فوراً حذف نمی‌کنیم.
+             * ۳۰ ثانیه فرصت reconnect دارد.
+             */
+
+            player.connected =
+                false;
+
+            player.ws =
+                null;
+
+            player.disconnectedAt =
+                Date.now();
+
+            broadcastExcept(
+                room,
+                playerId,
+                {
+                    type:
+                        "player_disconnected",
+
+                    playerId,
+
+                    gracePeriod:
+                        DISCONNECT_GRACE
+                }
+            );
+
+            sendRoomState(
+                room
+            );
+
+            setTimeout(
+                () => {
+
+                    if (
+                        !rooms.has(
+                            room.id
+                        )
+                    ) {
+                        return;
+                    }
+
+                    const current =
+                        room.players.get(
+                            playerId
+                        );
+
+                    if (!current) {
+                        return;
+                    }
+
+                    if (
+                        current.connected
+                    ) {
+                        return;
+                    }
+
+                    if (
+                        !current.disconnectedAt
+                    ) {
+                        return;
+                    }
+
+                    if (
+                        Date.now() -
+                        current.disconnectedAt <
+                        DISCONNECT_GRACE
+                    ) {
+                        return;
+                    }
+
+                    removePlayer(
+                        room,
+                        playerId
+                    );
+
+                },
+                DISCONNECT_GRACE + 1000
+            );
+
+            currentRoom =
+                null;
+
+            playerId =
+                null;
+        }
+
+        // =================================================
+        // LEAVE ROOM
+        // =================================================
+
+        function leaveRoom(
+            immediate
+        ) {
+
+            if (
+                !currentRoom ||
+                !playerId
+            ) {
+                return;
+            }
+
+            const room =
+                currentRoom;
+
+            const id =
+                playerId;
+
+            if (immediate) {
+                removePlayer(
+                    room,
+                    id
+                );
+            }
+
+            currentRoom =
+                null;
+
+            playerId =
+                null;
+        }
     }
 );
+
+// ======================================================
+// REMOVE PLAYER
+// ======================================================
+
+function removePlayer(
+    room,
+    playerId
+) {
+    if (!room) return;
+
+    const player =
+        room.players.get(
+            playerId
+        );
+
+    if (!player) return;
+
+    const wasCurrent =
+        room.currentPlayerId ===
+        playerId;
+
+    const wasHost =
+        room.hostId ===
+        playerId;
+
+    room.players.delete(
+        playerId
+    );
+
+    // ==================================================
+    // EMPTY ROOM
+    // ==================================================
+
+    if (
+        room.players.size === 0
+    ) {
+
+        rooms.delete(
+            room.id
+        );
+
+        return;
+    }
+
+    // ==================================================
+    // NEW HOST
+    // ==================================================
+
+    if (wasHost) {
+
+        const first =
+            Array
+                .from(
+                    room.players.values()
+                )[0];
+
+        room.hostId =
+            first.id;
+    }
+
+    // ==================================================
+    // CURRENT PLAYER LEFT
+    // ==================================================
+
+    if (wasCurrent) {
+
+        const players =
+            Array
+                .from(
+                    room.players.values()
+                )
+                .filter(
+                    p =>
+                        p.connected &&
+                        !p.eliminated
+                );
+
+        if (players.length) {
+
+            room.currentPlayerIndex = 0;
+
+            room.currentPlayerId =
+                players[0].id;
+
+            room.dice =
+                null;
+
+            broadcast(
+                room,
+                {
+                    type:
+                        "turn_changed",
+
+                    currentPlayerId:
+                        room.currentPlayerId,
+
+                    currentPlayerIndex:
+                        0,
+
+                    turn:
+                        room.turn
+                }
+            );
+        } else {
+
+            room.currentPlayerId =
+                null;
+
+            room.dice =
+                null;
+        }
+    }
+
+    // ==================================================
+    // NOTIFY
+    // ==================================================
+
+    broadcast(
+        room,
+        {
+            type:
+                "player_left",
+
+            playerId,
+
+            playerCount:
+                room.players.size,
+
+            hostId:
+                room.hostId
+        }
+    );
+
+    sendRoomState(
+        room
+    );
+}
 
 // ======================================================
 // HEARTBEAT
 // ======================================================
 
-const heartbeatInterval =
+const heartbeat =
     setInterval(
         () => {
 
@@ -2890,147 +2212,84 @@ const heartbeatInterval =
             ) {
 
                 if (
-                    ws.readyState ===
-                    WebSocket.OPEN
+                    ws.isAlive === false
                 ) {
 
-                    send(ws, {
-
-                        type:
-                            "heartbeat",
-
-                        time:
-                            Date.now()
-
-                    });
-
-                }
-
-            }
-
-        },
-        25000
-    );
-
-// ======================================================
-// TURN TIMER
-// ======================================================
-
-const turnInterval =
-    setInterval(
-        () => {
-
-            for (
-                const room
-                of rooms.values()
-            ) {
-
-                try {
-
-                    checkTurnTimeout(
-                        room
-                    );
-
-                } catch (error) {
-
-                    console.error(
-                        "Turn timer error:",
-                        error.message
-                    );
-
-                }
-
-            }
-
-        },
-        1000
-    );
-
-// ======================================================
-// CLEANUP ROOMS
-// ======================================================
-
-const cleanupInterval =
-    setInterval(
-        () => {
-
-            const now =
-                Date.now();
-
-            for (
-                const [roomId, room]
-                of rooms
-            ) {
-
-                // اتاق خالی
-                if (
-                    room.players.size === 0
-                ) {
-
-                    rooms.delete(
-                        roomId
-                    );
+                    try {
+                        ws.terminate();
+                    } catch {}
 
                     continue;
-
                 }
 
-                // بازیکنان قطع‌شده قدیمی
-                for (
-                    const [playerId, player]
-                    of room.players
-                ) {
+                ws.isAlive =
+                    false;
 
-                    if (
-                        !player.connected &&
-                        player.disconnectedAt &&
-                        now -
-                        player.disconnectedAt >
-                        RECONNECT_TIME
-                    ) {
-
-                        room.players.delete(
-                            playerId
-                        );
-
-                        broadcast(
-                            room,
-                            {
-
-                                type:
-                                    "player_left",
-
-                                playerId,
-
-                                playerIndex:
-                                    player.index
-
-                            }
-                        );
-
-                    }
-
-                }
-
-                // اتاق بدون فعالیت
-                if (
-                    room.players.size === 0 &&
-                    now -
-                    room.lastActivity >
-                    ROOM_EXPIRE_TIME
-                ) {
-
-                    rooms.delete(
-                        roomId
-                    );
-
-                }
-
+                try {
+                    ws.ping();
+                } catch {}
             }
 
         },
         30000
     );
+
+// ======================================================
+// CLEANUP
+// ======================================================
+
+setInterval(
+    () => {
+
+        const now =
+            Date.now();
+
+        for (
+            const [roomId, room]
+            of rooms
+        ) {
+
+            if (
+                room.players.size === 0
+            ) {
+
+                rooms.delete(
+                    roomId
+                );
+
+                continue;
+            }
+
+            if (
+                now -
+                room.updatedAt >
+                ROOM_EXPIRE_TIME
+            ) {
+
+                /*
+                 * اگر بازی فعال نیست
+                 * و مدت زیادی بدون
+                 * فعالیت مانده باشد.
+                 */
+
+                if (
+                    !room.gameStarted
+                ) {
+
+                    rooms.delete(
+                        roomId
+                    );
+
+                    console.log(
+                        `Expired room: ${roomId}`
+                    );
+                }
+            }
+        }
+
+    },
+    5 * 60 * 1000
+);
 
 // ======================================================
 // SERVER ERROR
@@ -3044,7 +2303,6 @@ server.on(
             "HTTP server error:",
             error
         );
-
     }
 );
 
@@ -3062,7 +2320,7 @@ server.listen(
         );
 
         console.log(
-            "LUDO MULTIPLAYER SERVER"
+            " LUDO MULTIPLAYER SERVER"
         );
 
         console.log(
@@ -3074,75 +2332,55 @@ server.listen(
         );
 
         console.log(
-            "WebSocket: ENABLED"
+            `Max players: ${MAX_PLAYERS}`
         );
 
         console.log(
-            "Multiplayer: ENABLED"
+            `WebSocket: ws://0.0.0.0:${PORT}`
         );
 
         console.log(
-            "Version: 3.0.0"
+            "Server is ready."
         );
 
         console.log(
             "======================================"
         );
-
     }
 );
 
 // ======================================================
-// SHUTDOWN
+// PROCESS CLEANUP
 // ======================================================
-
-function shutdown() {
-
-    console.log(
-        "Shutting down server..."
-    );
-
-    clearInterval(
-        heartbeatInterval
-    );
-
-    clearInterval(
-        turnInterval
-    );
-
-    clearInterval(
-        cleanupInterval
-    );
-
-    for (
-        const ws
-        of wss.clients
-    ) {
-
-        try {
-
-            ws.close();
-
-        } catch (error) {}
-
-    }
-
-    server.close(
-        () => {
-
-            process.exit(0);
-
-        }
-    );
-
-}
 
 process.on(
     "SIGTERM",
-    shutdown
+    () => {
+
+        clearInterval(
+            heartbeat
+        );
+
+        server.close(
+            () => {
+                process.exit(0);
+            }
+        );
+    }
 );
 
 process.on(
     "SIGINT",
-    shutdown
+    () => {
+
+        clearInterval(
+            heartbeat
+        );
+
+        server.close(
+            () => {
+                process.exit(0);
+            }
+        );
+    }
 );

@@ -1,21 +1,25 @@
 // ======================================================
 // LUDO MULTIPLAYER SERVER
-// نسخه 3.0.0
-// WebSocket + Room + Full Game State Sync
+// نسخه چندنفره واقعی
+// WebSocket + Server Authoritative State
 // ======================================================
 
 const http = require("http");
 const WebSocket = require("ws");
 
 // ======================================================
-// SETTINGS
+// CONFIG
 // ======================================================
 
 const PORT = process.env.PORT || 3000;
-
 const MAX_PLAYERS = 4;
 
-const ROOM_EMPTY_TIMEOUT = 30 * 60 * 1000;
+const COLORS = [
+    "red",
+    "green",
+    "yellow",
+    "blue"
+];
 
 // ======================================================
 // HTTP SERVER
@@ -26,14 +30,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
         "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "*",
-        "Access-Control-Allow-Methods": "GET, OPTIONS"
+        "Cache-Control": "no-cache"
     });
-
-    if (req.method === "OPTIONS") {
-        res.end();
-        return;
-    }
 
     res.end(
         JSON.stringify({
@@ -90,11 +88,15 @@ function send(ws, data) {
 
 }
 
+// ------------------------------------------------------
+
 function broadcast(room, data) {
 
     if (!room) return;
 
-    for (const player of room.players.values()) {
+    for (
+        const player of room.players.values()
+    ) {
 
         send(
             player.ws,
@@ -105,19 +107,22 @@ function broadcast(room, data) {
 
 }
 
+// ------------------------------------------------------
+
 function broadcastExcept(
     room,
-    exceptPlayerId,
+    playerId,
     data
 ) {
 
     if (!room) return;
 
-    for (const player of room.players.values()) {
+    for (
+        const player of room.players.values()
+    ) {
 
         if (
-            player.id !==
-            exceptPlayerId
+            player.id !== playerId
         ) {
 
             send(
@@ -131,19 +136,26 @@ function broadcastExcept(
 
 }
 
+// ------------------------------------------------------
+
 function getTotalPlayers() {
 
     let total = 0;
 
-    for (const room of rooms.values()) {
+    for (
+        const room of rooms.values()
+    ) {
 
-        total += room.players.size;
+        total +=
+            room.players.size;
 
     }
 
     return total;
 
 }
+
+// ------------------------------------------------------
 
 function generateRoomId() {
 
@@ -165,37 +177,23 @@ function generateRoomId() {
 
 }
 
+// ------------------------------------------------------
+
 function generatePlayerId() {
 
     return (
         Math.random()
             .toString(36)
-            .substring(2, 10) +
-
+            .substring(2, 10)
+        +
         Date.now()
             .toString(36)
     );
 
 }
 
-function getPlayerColor(index) {
-
-    const colors = [
-        "red",
-        "green",
-        "yellow",
-        "blue"
-    ];
-
-    return (
-        colors[index] ||
-        "red"
-    );
-
-}
-
 // ======================================================
-// CREATE ROOM
+// ROOM
 // ======================================================
 
 function createRoom(id) {
@@ -208,44 +206,41 @@ function createRoom(id) {
 
         gameStarted: false,
 
+        gameFinished: false,
+
         currentPlayerIndex: 0,
 
         currentPlayerId: null,
 
         dice: null,
 
+        diceLocked: false,
+
+        turn: 0,
+
+        lastMove: null,
+
+        rankings: [],
+
         createdAt: Date.now(),
 
         updatedAt: Date.now(),
 
-        // ==================================================
-        // SERVER GAME STATE
-        // ==================================================
-
+        // وضعیت اصلی لودو
         gameState: {
 
-            turn: 0,
+            pieces: [],
 
-            lastMove: null,
+            captured: [],
 
-            lastDice: null,
+            finished: [],
 
-            // وضعیت کامل بازی کلاینت
-            clientState: null,
-
-            // رتبه‌بندی
-            rankings: [],
-
-            // بازیکنان حذف شده
             eliminated: [
                 false,
                 false,
                 false,
                 false
-            ],
-
-            // پایان بازی
-            gameFinished: false
+            ]
 
         }
 
@@ -254,8 +249,19 @@ function createRoom(id) {
 }
 
 // ======================================================
-// ROOM PLAYERS
+// PLAYER
 // ======================================================
+
+function getPlayerColor(index) {
+
+    return (
+        COLORS[index] ||
+        "red"
+    );
+
+}
+
+// ------------------------------------------------------
 
 function getPlayers(room) {
 
@@ -264,10 +270,7 @@ function getPlayers(room) {
             room.players.values()
         )
         .map(
-            function(
-                player,
-                index
-            ) {
+            function(player, index) {
 
                 return {
 
@@ -288,7 +291,9 @@ function getPlayers(room) {
                         !!player.ready,
 
                     connected:
-                        !!player.connected
+                        player.ws &&
+                        player.ws.readyState ===
+                        WebSocket.OPEN
 
                 };
 
@@ -298,14 +303,14 @@ function getPlayers(room) {
 }
 
 // ======================================================
-// FULL ROOM STATE
+// PUBLIC ROOM STATE
 // ======================================================
 
 function getRoomState(room) {
 
-    if (!room) return null;
-
     return {
+
+        type: "room_state",
 
         roomId:
             room.id,
@@ -322,43 +327,35 @@ function getRoomState(room) {
         gameStarted:
             room.gameStarted,
 
+        gameFinished:
+            room.gameFinished,
+
         currentPlayerId:
             room.currentPlayerId,
-
-        currentPlayerIndex:
-            room.currentPlayerIndex,
 
         dice:
             room.dice,
 
+        diceLocked:
+            room.diceLocked,
+
         turn:
-            room.gameState.turn,
-
-        lastMove:
-            room.gameState.lastMove,
-
-        lastDice:
-            room.gameState.lastDice,
+            room.turn,
 
         rankings:
-            room.gameState.rankings,
+            room.rankings,
 
-        eliminated:
-            room.gameState.eliminated,
+        lastMove:
+            room.lastMove,
 
-        gameFinished:
-            room.gameState.gameFinished,
-
-        clientState:
-            room.gameState.clientState
+        gameState:
+            room.gameState
 
     };
 
 }
 
-// ======================================================
-// SEND ROOM STATE
-// ======================================================
+// ------------------------------------------------------
 
 function sendRoomState(room) {
 
@@ -366,43 +363,63 @@ function sendRoomState(room) {
 
     broadcast(
         room,
-        {
-            type:
-                "room_state",
-
-            ...getRoomState(room)
-        }
+        getRoomState(room)
     );
 
 }
 
 // ======================================================
-// SEND STATE TO ONE PLAYER
+// INITIAL GAME STATE
 // ======================================================
 
-function sendStateToPlayer(
-    room,
-    playerId
-) {
+function createInitialGameState(room) {
 
-    if (!room) return;
+    room.gameState = {
 
-    const player =
-        room.players.get(
-            playerId
-        );
+        pieces:
+            getPlayers(room).map(
+                function(player) {
 
-    if (!player) return;
+                    return {
 
-    send(
-        player.ws,
-        {
-            type:
-                "room_state",
+                        playerId:
+                            player.id,
 
-            ...getRoomState(room)
-        }
-    );
+                        color:
+                            player.color,
+
+                        pieces: [
+                            {
+                                progress: -1
+                            },
+                            {
+                                progress: -1
+                            },
+                            {
+                                progress: -1
+                            },
+                            {
+                                progress: -1
+                            }
+                        ]
+
+                    };
+
+                }
+            ),
+
+        captured: [],
+
+        finished: [],
+
+        eliminated: [
+            false,
+            false,
+            false,
+            false
+        ]
+
+    };
 
 }
 
@@ -434,51 +451,31 @@ function startGame(room) {
 
     }
 
-    room.gameStarted =
-        true;
+    room.gameStarted = true;
 
-    room.gameState.turn =
-        1;
+    room.gameFinished = false;
 
-    room.gameState.lastMove =
-        null;
+    room.turn = 1;
 
-    room.gameState.lastDice =
-        null;
+    room.currentPlayerIndex = 0;
 
-    room.gameState.rankings =
-        [];
+    room.rankings = [];
 
-    room.gameState.eliminated =
-        [
-            false,
-            false,
-            false,
-            false
-        ];
+    room.dice = null;
 
-    room.gameState.gameFinished =
-        false;
+    room.diceLocked = false;
 
-    room.gameState.clientState =
-        null;
+    room.lastMove = null;
+
+    createInitialGameState(room);
 
     const players =
         Array.from(
             room.players.values()
         );
 
-    room.currentPlayerIndex =
-        0;
-
     room.currentPlayerId =
         players[0].id;
-
-    room.dice =
-        null;
-
-    room.updatedAt =
-        Date.now();
 
     broadcast(
         room,
@@ -490,22 +487,20 @@ function startGame(room) {
             roomId:
                 room.id,
 
-            currentPlayerId:
-                room.currentPlayerId,
-
-            currentPlayerIndex:
-                room.currentPlayerIndex,
-
             players:
                 getPlayers(room),
 
+            currentPlayerId:
+                room.currentPlayerId,
+
             turn:
-                room.gameState.turn
+                room.turn,
+
+            gameState:
+                room.gameState
 
         }
     );
-
-    sendRoomState(room);
 
     return true;
 
@@ -520,7 +515,7 @@ function nextTurn(room) {
     if (!room) return;
 
     if (
-        room.players.size === 0
+        room.gameFinished
     ) {
 
         return;
@@ -547,8 +542,7 @@ function nextTurn(room) {
         players.length
     ) {
 
-        room.currentPlayerIndex =
-            0;
+        room.currentPlayerIndex = 0;
 
     }
 
@@ -557,13 +551,13 @@ function nextTurn(room) {
             room.currentPlayerIndex
         ].id;
 
-    room.gameState.turn++;
+    room.turn++;
 
-    room.dice =
-        null;
+    room.dice = null;
 
-    room.gameState.lastDice =
-        null;
+    room.diceLocked = false;
+
+    room.lastMove = null;
 
     room.updatedAt =
         Date.now();
@@ -578,14 +572,14 @@ function nextTurn(room) {
             currentPlayerId:
                 room.currentPlayerId,
 
-            currentPlayerIndex:
-                room.currentPlayerIndex,
-
             turn:
-                room.gameState.turn,
+                room.turn,
 
             dice:
-                null
+                null,
+
+            diceLocked:
+                false
 
         }
     );
@@ -593,7 +587,7 @@ function nextTurn(room) {
 }
 
 // ======================================================
-// ROLL DICE
+// DICE
 // ======================================================
 
 function rollDice(
@@ -605,8 +599,7 @@ function rollDice(
 
         return {
             success: false,
-            message:
-                "اتاق پیدا نشد."
+            message: "اتاق پیدا نشد."
         };
 
     }
@@ -624,7 +617,7 @@ function rollDice(
     }
 
     if (
-        room.gameState.gameFinished
+        room.gameFinished
     ) {
 
         return {
@@ -668,15 +661,8 @@ function rollDice(
     room.dice =
         value;
 
-    room.gameState.lastDice =
-        {
-            playerId,
-            value,
-            turn:
-                room.gameState.turn,
-            time:
-                Date.now()
-        };
+    room.diceLocked =
+        true;
 
     room.updatedAt =
         Date.now();
@@ -693,15 +679,14 @@ function rollDice(
             value,
 
             turn:
-                room.gameState.turn
+                room.turn
 
         }
     );
 
     return {
 
-        success:
-            true,
+        success: true,
 
         value
 
@@ -710,31 +695,21 @@ function rollDice(
 }
 
 // ======================================================
-// UPDATE CLIENT GAME STATE
+// MOVE VALIDATION
 // ======================================================
 
-function updateClientState(
+function validateMove(
     room,
     playerId,
-    state
+    move
 ) {
 
-    if (!room) {
+    if (!move) {
 
         return {
-            success: false,
+            valid: false,
             message:
-                "اتاق پیدا نشد."
-        };
-
-    }
-
-    if (!room.gameStarted) {
-
-        return {
-            success: false,
-            message:
-                "بازی شروع نشده است."
+                "اطلاعات حرکت ارسال نشده است."
         };
 
     }
@@ -745,7 +720,7 @@ function updateClientState(
     ) {
 
         return {
-            success: false,
+            valid: false,
             message:
                 "الان نوبت شما نیست."
         };
@@ -753,100 +728,52 @@ function updateClientState(
     }
 
     if (
-        !state ||
-        typeof state !== "object"
+        room.dice === null
     ) {
 
         return {
-            success: false,
+            valid: false,
             message:
-                "وضعیت بازی نامعتبر است."
+                "ابتدا تاس بریزید."
         };
 
     }
 
-    room.gameState.clientState =
-        state;
+    const pieceIndex =
+        Number(
+            move.pieceIndex
+        );
 
     if (
-        Array.isArray(
-            state.rankings
-        )
+        !Number.isInteger(
+            pieceIndex
+        ) ||
+        pieceIndex < 0 ||
+        pieceIndex > 3
     ) {
 
-        room.gameState.rankings =
-            state.rankings;
+        return {
+            valid: false,
+            message:
+                "مهره نامعتبر است."
+        };
 
     }
-
-    if (
-        Array.isArray(
-            state.eliminated
-        )
-    ) {
-
-        room.gameState.eliminated =
-            state.eliminated;
-
-    }
-
-    if (
-        typeof state.gameFinished ===
-        "boolean"
-    ) {
-
-        room.gameState.gameFinished =
-            state.gameFinished;
-
-    }
-
-    room.updatedAt =
-        Date.now();
-
-    broadcast(
-        room,
-        {
-
-            type:
-                "state_sync",
-
-            playerId,
-
-            state:
-                room.gameState.clientState,
-
-            rankings:
-                room.gameState.rankings,
-
-            eliminated:
-                room.gameState.eliminated,
-
-            gameFinished:
-                room.gameState.gameFinished,
-
-            turn:
-                room.gameState.turn,
-
-            currentPlayerId:
-                room.currentPlayerId
-
-        }
-    );
 
     return {
-        success: true
+        valid: true
     };
 
 }
 
 // ======================================================
-// MAKE MOVE
+// MOVE
 // ======================================================
 
 function makeMove(
     room,
     playerId,
-    moveData
+    move
 ) {
 
     if (!room) {
@@ -872,7 +799,7 @@ function makeMove(
     }
 
     if (
-        room.gameState.gameFinished
+        room.gameFinished
     ) {
 
         return {
@@ -883,49 +810,203 @@ function makeMove(
 
     }
 
+    const validation =
+        validateMove(
+            room,
+            playerId,
+            move
+        );
+
     if (
-        room.currentPlayerId !==
-        playerId
+        !validation.valid
     ) {
 
         return {
+
             success: false,
+
             message:
-                "الان نوبت شما نیست."
+                validation.message
+
         };
 
     }
 
-    if (
-        room.dice === null
-    ) {
-
-        return {
-            success: false,
-            message:
-                "ابتدا تاس بریزید."
-        };
-
-    }
-
-    const diceValue =
+    const dice =
         room.dice;
 
-    room.gameState.lastMove =
-        {
+    const playerIndex =
+        room.currentPlayerIndex;
 
-            playerId,
+    const playerState =
+        room.gameState
+            .pieces[playerIndex];
 
-            dice:
-                diceValue,
+    if (!playerState) {
 
-            move:
-                moveData || null,
+        return {
 
-            time:
-                Date.now()
+            success: false,
+
+            message:
+                "وضعیت بازیکن پیدا نشد."
 
         };
+
+    }
+
+    const piece =
+        playerState.pieces[
+            move.pieceIndex
+        ];
+
+    if (!piece) {
+
+        return {
+
+            success: false,
+
+            message:
+                "مهره پیدا نشد."
+
+        };
+
+    }
+
+    const oldProgress =
+        Number(
+            piece.progress
+        );
+
+    let newProgress =
+        oldProgress;
+
+    // --------------------------------------------------
+    // خروج از خانه
+    // --------------------------------------------------
+
+    if (
+        oldProgress === -1
+    ) {
+
+        if (
+            dice !== 6
+        ) {
+
+            return {
+
+                success: false,
+
+                message:
+                    "برای خارج کردن مهره باید ۶ بیاورید."
+
+            };
+
+        }
+
+        newProgress = 0;
+
+    }
+
+    // --------------------------------------------------
+    // حرکت عادی
+    // --------------------------------------------------
+
+    else {
+
+        newProgress =
+            oldProgress + dice;
+
+    }
+
+    // --------------------------------------------------
+    // بیشتر از خانه نهایی
+    // --------------------------------------------------
+
+    if (
+        newProgress > 58
+    ) {
+
+        return {
+
+            success: false,
+
+            message:
+                "این مهره با این تاس قابل حرکت نیست."
+
+        };
+
+    }
+
+    piece.progress =
+        newProgress;
+
+    room.lastMove = {
+
+        playerId,
+
+        playerIndex,
+
+        pieceIndex:
+            move.pieceIndex,
+
+        oldProgress,
+
+        newProgress,
+
+        dice,
+
+        time:
+            Date.now()
+
+    };
+
+    // ==================================================
+    // CAPTURE
+    // ==================================================
+
+    let captured = [];
+
+    if (
+        newProgress >= 0 &&
+        newProgress < 52
+    ) {
+
+        const captureData =
+            captureOpponents(
+                room,
+                playerIndex,
+                newProgress
+            );
+
+        captured =
+            captureData;
+
+    }
+
+    // ==================================================
+    // FINISH PIECE
+    // ==================================================
+
+    if (
+        newProgress === 58
+    ) {
+
+        if (
+            !room.gameState
+                .finished
+                .includes(playerIndex)
+        ) {
+
+            room.gameState
+                .finished
+                .push(
+                    playerIndex
+                );
+
+        }
+
+    }
 
     room.updatedAt =
         Date.now();
@@ -939,193 +1020,308 @@ function makeMove(
 
             playerId,
 
-            dice:
-                diceValue,
+            playerIndex,
 
-            move:
-                moveData || null,
+            pieceIndex:
+                move.pieceIndex,
+
+            oldProgress,
+
+            newProgress,
+
+            dice,
+
+            captured,
 
             turn:
-                room.gameState.turn
+                room.turn,
+
+            gameState:
+                room.gameState
 
         }
     );
 
+    // ==================================================
+    // PLAYER FINISHED
+    // ==================================================
+
+    checkPlayerFinished(
+        room,
+        playerIndex
+    );
+
+    // ==================================================
+    // NEXT TURN
+    // ==================================================
+
+    if (
+        !room.gameFinished
+    ) {
+
+        nextTurn(
+            room
+        );
+
+    }
+
     return {
+
         success: true
+
     };
 
 }
 
 // ======================================================
-// FINISH TURN
+// CAPTURE
 // ======================================================
 
-function finishTurn(
+function captureOpponents(
     room,
-    playerId,
-    keepTurn
+    playerIndex,
+    progress
 ) {
 
-    if (!room) {
-
-        return {
-            success: false,
-            message:
-                "اتاق پیدا نشد."
-        };
-
-    }
+    const captured = [];
 
     if (
-        room.currentPlayerId !==
-        playerId
+        progress < 0 ||
+        progress >= 52
     ) {
 
-        return {
-            success: false,
-            message:
-                "الان نوبت شما نیست."
-        };
+        return captured;
 
     }
 
-    if (
-        room.dice === null
+    for (
+        let i = 0;
+        i < room.gameState.pieces.length;
+        i++
     ) {
 
-        return {
-            success: false,
-            message:
-                "تاسی برای این نوبت وجود ندارد."
-        };
+        if (
+            i === playerIndex
+        ) {
 
-    }
+            continue;
 
-    // اگر بازی تمام شده
-    if (
-        room.gameState.gameFinished
-    ) {
+        }
 
-        room.dice =
-            null;
+        const opponent =
+            room.gameState
+                .pieces[i];
 
-        broadcast(
-            room,
-            {
-                type:
-                    "game_finished",
+        if (!opponent) continue;
 
-                rankings:
-                    room.gameState.rankings
-            }
-        );
+        for (
+            let j = 0;
+            j < opponent.pieces.length;
+            j++
+        ) {
 
-        return {
-            success: true
-        };
+            const piece =
+                opponent.pieces[j];
 
-    }
+            if (!piece) continue;
 
-    // عدد ۶ یا شرایط مشابه:
-    // بازیکن می‌تواند نوبتش را نگه دارد.
-    if (keepTurn === true) {
+            if (
+                piece.progress === progress
+            ) {
 
-        room.dice =
-            null;
+                piece.progress =
+                    -1;
 
-        room.gameState.lastDice =
-            null;
+                captured.push({
 
-        room.updatedAt =
-            Date.now();
+                    playerIndex:
+                        i,
 
-        broadcast(
-            room,
-            {
+                    pieceIndex:
+                        j
 
-                type:
-                    "turn_kept",
-
-                playerId,
-
-                turn:
-                    room.gameState.turn
+                });
 
             }
-        );
 
-        return {
-            success: true
-        };
+        }
 
     }
 
-    nextTurn(room);
-
-    return {
-        success: true
-    };
+    return captured;
 
 }
 
 // ======================================================
-// RANKING UPDATE
+// PLAYER FINISHED
 // ======================================================
 
-function updateRanking(
+function checkPlayerFinished(
     room,
-    playerId,
-    rankings,
-    eliminated
+    playerIndex
 ) {
 
-    if (!room) return;
+    const player =
+        room.gameState
+            .pieces[playerIndex];
 
-    if (
-        room.currentPlayerId !==
-        playerId
-    ) {
+    if (!player) return;
+
+    const finished =
+        player.pieces.every(
+            function(piece) {
+
+                return (
+                    piece.progress === 58
+                );
+
+            }
+        );
+
+    if (!finished) {
 
         return;
 
     }
 
     if (
-        Array.isArray(rankings)
+        room.rankings.includes(
+            playerIndex
+        )
     ) {
 
-        room.gameState.rankings =
-            rankings;
+        return;
 
     }
 
-    if (
-        Array.isArray(eliminated)
-    ) {
+    room.rankings.push(
+        playerIndex
+    );
 
-        room.gameState.eliminated =
-            eliminated;
-
-    }
-
-    room.updatedAt =
-        Date.now();
+    room.gameState
+        .eliminated[playerIndex] =
+        true;
 
     broadcast(
         room,
         {
 
             type:
-                "ranking_update",
+                "player_finished",
+
+            playerIndex,
+
+            rank:
+                room.rankings.length,
 
             rankings:
-                room.gameState.rankings,
-
-            eliminated:
-                room.gameState.eliminated
+                room.rankings
 
         }
+    );
+
+    const active =
+        getActivePlayerIndexes(
+            room
+        );
+
+    if (
+        active.length <= 1
+    ) {
+
+        if (
+            active.length === 1
+        ) {
+
+            const last =
+                active[0];
+
+            if (
+                !room.rankings
+                    .includes(last)
+            ) {
+
+                room.rankings.push(
+                    last
+                );
+
+            }
+
+        }
+
+        room.gameFinished =
+            true;
+
+        room.dice =
+            null;
+
+        room.diceLocked =
+            false;
+
+        broadcast(
+            room,
+            {
+
+                type:
+                    "game_finished",
+
+                rankings:
+                    room.rankings,
+
+                gameState:
+                    room.gameState
+
+            }
+        );
+
+    }
+
+}
+
+// ======================================================
+// ACTIVE PLAYERS
+// ======================================================
+
+function getActivePlayerIndexes(
+    room
+) {
+
+    const result = [];
+
+    for (
+        let i = 0;
+        i < room.gameState
+            .pieces.length;
+        i++
+    ) {
+
+        if (
+            !room.gameState
+                .eliminated[i]
+        ) {
+
+            result.push(i);
+
+        }
+
+    }
+
+    return result;
+
+}
+
+// ======================================================
+// GET STATE
+// ======================================================
+
+function sendFullState(
+    ws,
+    room
+) {
+
+    send(
+        ws,
+        getRoomState(room)
     );
 
 }
@@ -1136,7 +1332,7 @@ function updateRanking(
 
 wss.on(
     "connection",
-    (ws) => {
+    function(ws) {
 
         let currentRoom =
             null;
@@ -1159,10 +1355,7 @@ wss.on(
                     "اتصال به سرور برقرار شد.",
 
                 serverTime:
-                    Date.now(),
-
-                version:
-                    "3.0.0"
+                    Date.now()
 
             }
         );
@@ -1173,7 +1366,7 @@ wss.on(
 
         ws.on(
             "message",
-            (raw) => {
+            function(raw) {
 
                 let message;
 
@@ -1260,7 +1453,9 @@ wss.on(
                     "create_room"
                 ) {
 
-                    if (currentRoom) {
+                    if (
+                        currentRoom
+                    ) {
 
                         send(
                             ws,
@@ -1299,7 +1494,8 @@ wss.on(
 
                         name:
                             String(
-                                message.name || ""
+                                message.name ||
+                                ""
                             )
                                 .trim()
                                 .substring(
@@ -1314,13 +1510,7 @@ wss.on(
                             ),
 
                         ready:
-                            false,
-
-                        connected:
-                            true,
-
-                        joinedAt:
-                            Date.now()
+                            false
 
                     };
 
@@ -1371,7 +1561,9 @@ wss.on(
                     "join_room"
                 ) {
 
-                    if (currentRoom) {
+                    if (
+                        currentRoom
+                    ) {
 
                         send(
                             ws,
@@ -1392,29 +1584,11 @@ wss.on(
 
                     const roomId =
                         String(
-                            message.roomId || ""
+                            message.roomId ||
+                            ""
                         )
                             .trim()
                             .toUpperCase();
-
-                    if (!roomId) {
-
-                        send(
-                            ws,
-                            {
-
-                                type:
-                                    "error",
-
-                                message:
-                                    "کد اتاق وارد نشده است."
-
-                            }
-                        );
-
-                        return;
-
-                    }
 
                     const room =
                         rooms.get(
@@ -1498,7 +1672,8 @@ wss.on(
 
                         name:
                             String(
-                                message.name || ""
+                                message.name ||
+                                ""
                             )
                                 .trim()
                                 .substring(
@@ -1513,13 +1688,7 @@ wss.on(
                             ),
 
                         ready:
-                            false,
-
-                        connected:
-                            true,
-
-                        joinedAt:
-                            Date.now()
+                            false
 
                     };
 
@@ -1528,11 +1697,11 @@ wss.on(
                         player
                     );
 
-                    currentRoom =
-                        room;
-
                     room.updatedAt =
                         Date.now();
+
+                    currentRoom =
+                        room;
 
                     send(
                         ws,
@@ -1591,15 +1760,18 @@ wss.on(
                     }
 
                     const player =
-                        currentRoom.players.get(
-                            playerId
-                        );
+                        currentRoom
+                            .players
+                            .get(
+                                playerId
+                            );
 
                     if (!player) return;
 
                     player.name =
                         String(
-                            message.name || ""
+                            message.name ||
+                            ""
                         )
                             .trim()
                             .substring(
@@ -1607,9 +1779,6 @@ wss.on(
                                 20
                             ) ||
                         player.name;
-
-                    currentRoom.updatedAt =
-                        Date.now();
 
                     sendRoomState(
                         currentRoom
@@ -1650,58 +1819,40 @@ wss.on(
 
                     }
 
-                    if (
-                        currentRoom.gameStarted
-                    ) {
-
-                        send(
-                            ws,
-                            {
-
-                                type:
-                                    "error",
-
-                                message:
-                                    "بازی قبلاً شروع شده است."
-
-                            }
-                        );
-
-                        return;
-
-                    }
-
                     const player =
-                        currentRoom.players.get(
-                            playerId
-                        );
+                        currentRoom
+                            .players
+                            .get(
+                                playerId
+                            );
 
                     if (!player) return;
 
                     player.ready =
                         message.ready !== false;
 
-                    currentRoom.updatedAt =
-                        Date.now();
-
                     sendRoomState(
                         currentRoom
                     );
 
-                    const players =
-                        Array.from(
-                            currentRoom.players.values()
-                        );
-
                     const readyPlayers =
-                        players.filter(
-                            function(p) {
-                                return p.ready;
-                            }
-                        );
+                        Array
+                            .from(
+                                currentRoom
+                                    .players
+                                    .values()
+                            )
+                            .filter(
+                                function(p) {
+
+                                    return p.ready;
+
+                                }
+                            );
 
                     if (
-                        readyPlayers.length >= 2
+                        readyPlayers.length >= 2 &&
+                        !currentRoom.gameStarted
                     ) {
 
                         startGame(
@@ -1758,28 +1909,7 @@ wss.on(
                                     "error",
 
                                 message:
-                                    "برای شروع بازی حداقل ۲ بازیکن لازم است."
-
-                            }
-                        );
-
-                        return;
-
-                    }
-
-                    if (
-                        currentRoom.gameStarted
-                    ) {
-
-                        send(
-                            ws,
-                            {
-
-                                type:
-                                    "error",
-
-                                message:
-                                    "بازی قبلاً شروع شده است."
+                                    "حداقل ۲ بازیکن لازم است."
 
                             }
                         );
@@ -1919,224 +2049,6 @@ wss.on(
                 }
 
                 // ==================================================
-                // UPDATE STATE
-                // ==================================================
-
-                if (
-                    message.type ===
-                    "update_state"
-                ) {
-
-                    if (
-                        !currentRoom ||
-                        !playerId
-                    ) {
-
-                        send(
-                            ws,
-                            {
-
-                                type:
-                                    "error",
-
-                                message:
-                                    "ابتدا وارد اتاق شوید."
-
-                            }
-                        );
-
-                        return;
-
-                    }
-
-                    const result =
-                        updateClientState(
-                            currentRoom,
-                            playerId,
-                            message.state
-                        );
-
-                    if (
-                        !result.success
-                    ) {
-
-                        send(
-                            ws,
-                            {
-
-                                type:
-                                    "error",
-
-                                message:
-                                    result.message
-
-                            }
-                        );
-
-                    }
-
-                    return;
-
-                }
-
-                // ==================================================
-                // FINISH TURN
-                // ==================================================
-
-                if (
-                    message.type ===
-                    "finish_turn"
-                ) {
-
-                    if (
-                        !currentRoom ||
-                        !playerId
-                    ) {
-
-                        send(
-                            ws,
-                            {
-
-                                type:
-                                    "error",
-
-                                message:
-                                    "ابتدا وارد اتاق شوید."
-
-                            }
-                        );
-
-                        return;
-
-                    }
-
-                    const result =
-                        finishTurn(
-                            currentRoom,
-                            playerId,
-                            message.keepTurn === true
-                        );
-
-                    if (
-                        !result.success
-                    ) {
-
-                        send(
-                            ws,
-                            {
-
-                                type:
-                                    "error",
-
-                                message:
-                                    result.message
-
-                            }
-                        );
-
-                    }
-
-                    return;
-
-                }
-
-                // ==================================================
-                // RANKING
-                // ==================================================
-
-                if (
-                    message.type ===
-                    "ranking_update"
-                ) {
-
-                    if (
-                        !currentRoom ||
-                        !playerId
-                    ) {
-
-                        return;
-
-                    }
-
-                    updateRanking(
-                        currentRoom,
-                        playerId,
-                        message.rankings,
-                        message.eliminated
-                    );
-
-                    return;
-
-                }
-
-                // ==================================================
-                // GAME FINISHED
-                // ==================================================
-
-                if (
-                    message.type ===
-                    "game_finished"
-                ) {
-
-                    if (
-                        !currentRoom ||
-                        !playerId
-                    ) {
-
-                        return;
-
-                    }
-
-                    if (
-                        currentRoom.currentPlayerId !==
-                        playerId
-                    ) {
-
-                        return;
-
-                    }
-
-                    currentRoom.gameState.gameFinished =
-                        true;
-
-                    if (
-                        Array.isArray(
-                            message.rankings
-                        )
-                    ) {
-
-                        currentRoom.gameState.rankings =
-                            message.rankings;
-
-                    }
-
-                    currentRoom.dice =
-                        null;
-
-                    currentRoom.updatedAt =
-                        Date.now();
-
-                    broadcast(
-                        currentRoom,
-                        {
-
-                            type:
-                                "game_finished",
-
-                            rankings:
-                                currentRoom.gameState.rankings,
-
-                            state:
-                                currentRoom.gameState.clientState
-
-                        }
-                    );
-
-                    return;
-
-                }
-
-                // ==================================================
                 // GET STATE
                 // ==================================================
 
@@ -2166,9 +2078,9 @@ wss.on(
 
                     }
 
-                    sendStateToPlayer(
-                        currentRoom,
-                        playerId
+                    sendFullState(
+                        ws,
+                        currentRoom
                     );
 
                     return;
@@ -2176,7 +2088,7 @@ wss.on(
                 }
 
                 // ==================================================
-                // LEAVE ROOM
+                // LEAVE
                 // ==================================================
 
                 if (
@@ -2191,7 +2103,7 @@ wss.on(
                 }
 
                 // ==================================================
-                // UNKNOWN MESSAGE
+                // UNKNOWN
                 // ==================================================
 
                 send(
@@ -2216,7 +2128,7 @@ wss.on(
 
         ws.on(
             "close",
-            () => {
+            function() {
 
                 leaveRoom();
 
@@ -2229,7 +2141,7 @@ wss.on(
 
         ws.on(
             "error",
-            (error) => {
+            function(error) {
 
                 console.error(
                     "WebSocket error:",
@@ -2257,19 +2169,16 @@ wss.on(
             const room =
                 currentRoom;
 
-            const leavingPlayerId =
+            const leavingPlayer =
                 playerId;
 
             room.players.delete(
-                leavingPlayerId
+                leavingPlayer
             );
 
-            room.updatedAt =
-                Date.now();
-
-            // ----------------------------------------------
+            // ------------------------------------------------
             // اگر اتاق خالی شد
-            // ----------------------------------------------
+            // ------------------------------------------------
 
             if (
                 room.players.size === 0
@@ -2289,13 +2198,12 @@ wss.on(
 
             }
 
-            // ----------------------------------------------
-            // اگر بازیکن نوبت‌دار خارج شد
-            // ----------------------------------------------
+            // ------------------------------------------------
+            // اگر بازی در حال اجرا بود
+            // ------------------------------------------------
 
             if (
-                room.currentPlayerId ===
-                leavingPlayerId
+                room.gameStarted
             ) {
 
                 const players =
@@ -2303,44 +2211,51 @@ wss.on(
                         room.players.values()
                     );
 
-                room.currentPlayerIndex =
-                    0;
+                // اگر بازیکن فعلی خارج شد
+                if (
+                    room.currentPlayerId ===
+                    leavingPlayer
+                ) {
 
-                room.currentPlayerId =
-                    players[0].id;
+                    room.currentPlayerIndex = 0;
 
-                room.dice =
-                    null;
+                    room.currentPlayerId =
+                        players[0].id;
 
-                room.gameState.turn++;
+                    room.dice =
+                        null;
 
-                broadcast(
-                    room,
-                    {
+                    room.diceLocked =
+                        false;
 
-                        type:
-                            "turn_changed",
+                    room.turn++;
 
-                        currentPlayerId:
-                            room.currentPlayerId,
+                    broadcast(
+                        room,
+                        {
 
-                        currentPlayerIndex:
-                            room.currentPlayerIndex,
+                            type:
+                                "turn_changed",
 
-                        turn:
-                            room.gameState.turn,
+                            currentPlayerId:
+                                room.currentPlayerId,
 
-                        dice:
-                            null
+                            turn:
+                                room.turn,
 
-                    }
-                );
+                            dice:
+                                null
+
+                        }
+                    );
+
+                }
 
             }
 
-            // ----------------------------------------------
+            // ------------------------------------------------
             // اطلاع خروج
-            // ----------------------------------------------
+            // ------------------------------------------------
 
             broadcast(
                 room,
@@ -2350,7 +2265,7 @@ wss.on(
                         "player_left",
 
                     playerId:
-                        leavingPlayerId,
+                        leavingPlayer,
 
                     playerCount:
                         room.players.size
@@ -2361,6 +2276,9 @@ wss.on(
             sendRoomState(
                 room
             );
+
+            room.updatedAt =
+                Date.now();
 
             currentRoom =
                 null;
@@ -2379,7 +2297,7 @@ wss.on(
 
 server.on(
     "error",
-    (error) => {
+    function(error) {
 
         console.error(
             "HTTP server error:",
@@ -2396,10 +2314,10 @@ server.on(
 server.listen(
     PORT,
     "0.0.0.0",
-    () => {
+    function() {
 
         console.log(
-            "========================================"
+            "======================================"
         );
 
         console.log(
@@ -2419,48 +2337,71 @@ server.listen(
         );
 
         console.log(
-            "========================================"
+            "======================================"
         );
 
     }
 );
 
 // ======================================================
-// CLEAN EMPTY ROOMS
+// KEEP ALIVE
 // ======================================================
 
 setInterval(
-    () => {
+    function() {
 
         const now =
             Date.now();
 
         for (
-            const [
-                roomId,
-                room
-            ] of rooms
+            const room of rooms.values()
         ) {
 
+            // حذف اتاق‌های خالی قدیمی
             if (
                 room.players.size === 0 &&
-                now -
-                room.createdAt >
-                ROOM_EMPTY_TIMEOUT
+                now - room.updatedAt >
+                30 * 60 * 1000
             ) {
 
                 rooms.delete(
-                    roomId
+                    room.id
                 );
 
-                console.log(
-                    `Deleted empty room: ${roomId}`
-                );
+                continue;
+
+            }
+
+            // Ping بازیکنان
+            for (
+                const player of room.players.values()
+            ) {
+
+                if (
+                    player.ws &&
+                    player.ws.readyState ===
+                    WebSocket.OPEN
+                ) {
+
+                    send(
+                        player.ws,
+                        {
+
+                            type:
+                                "server_ping",
+
+                            time:
+                                now
+
+                        }
+                    );
+
+                }
 
             }
 
         }
 
     },
-    10 * 60 * 1000
+    30000
 );
